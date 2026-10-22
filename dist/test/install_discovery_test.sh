@@ -17,7 +17,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { echo "ok: $*"; }
 
 VER="0.1.0-beta.1"
-OS="$(uname -s | tr 'A-Z' 'a-z')"; [ "$OS" = darwin ] || OS=linux
+OS="$(uname -s | tr '[:upper:]' '[:lower:]')"; [ "$OS" = darwin ] || OS=linux
 ARCH="$(uname -m)"; case "$ARCH" in x86_64|amd64) ARCH=amd64;; aarch64|arm64) ARCH=arm64;; esac
 NAME="pgx-$VER-$OS-$ARCH"
 
@@ -41,7 +41,7 @@ sleep 1
 SRV="http://127.0.0.1:$PORT"
 
 run_install() { # extra env... ; sets global RC and captures LOG
-  LOG="$TMP/log"; rm -rf "$TMP/opt" "$TMP/bin"
+  LOG="$TMP/log"; rm -rf "${TMP:?}/opt" "${TMP:?}/bin"
   # `if` so a nonzero install exit is captured, not aborted by set -e.
   if env PGX_API_URL="$SRV" PGX_BASE_URL="$SRV/download" \
       PGX_INSTALL_DIR="$TMP/opt/pgx" PGX_BIN_DIR="$TMP/bin" "$@" \

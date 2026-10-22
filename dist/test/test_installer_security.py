@@ -109,7 +109,22 @@ class InstallerSecurity(unittest.TestCase):
         info.type = tarfile.SYMTYPE
         info.linkname = '/tmp'
         self.pack(info)
-        self.assert_refused('links or special files')
+        self.assert_refused('unsafe links or special files')
+
+    def test_internal_hardlink_is_safe(self):
+        info = tarfile.TarInfo(self.name + '/same-data')
+        info.type = tarfile.LNKTYPE
+        info.linkname = self.name + '/share/pgx/dist.json'
+        self.pack(info)
+        result = self.run_install()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_external_hardlink_is_refused(self):
+        info = tarfile.TarInfo(self.name + '/escape')
+        info.type = tarfile.LNKTYPE
+        info.linkname = '/etc/passwd'
+        self.pack(info)
+        self.assert_refused('unsafe links or special files')
 
     def test_unrelated_binary_is_not_replaced(self):
         target = self.root / 'bin/pgx'

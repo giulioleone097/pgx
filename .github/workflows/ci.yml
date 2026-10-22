@@ -26,6 +26,7 @@ jobs:
       - name: Installer security and regression gate tests
         run: |
           python3 dist/test/test_installer_security.py
+          python3 dist/test/test_release_version.py
           python3 benchmarks/pgx/tests/test_regression_gate.py
       - name: Worker unit tests (node:test)
         run: node --test dist/pgx.dev/install-worker.test.js
@@ -97,7 +98,8 @@ jobs:
         run: |
           python3 -I tests/pgx/test_sql.py
           python3 -I tests/pgx/test_features.py
-          cargo test -p pgx --release --test lifecycle --test databases --test clone --test doctor --test run --test ttl --test hardening
+          python3 -I tests/pgx/test_parallel_limits.py
+          cargo test -p pgx --release --test lifecycle --test databases --test clone --test doctor --test run --test ttl --test hardening --test hardening_races
       - name: Installer end-to-end
         run: dist/test/install_test.sh
       - name: Installer discovery/version/checksum/download tests

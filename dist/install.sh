@@ -110,16 +110,29 @@ else
     --deny-self-hosted-runners >/dev/null || err "signed build provenance verification failed; refusing to install"
 fi
 
-# Distribution members must be regular files/directories inside the named root.
-# Reject links, special files, absolute paths and traversal before extracting.
+# Distribution members must stay inside the named root. Hardlinks produced
+# by tar for shared timezone files are allowed only to another path in that
+# root; symlinks, special files, absolute paths and traversal are rejected.
 tar -tzf "$tmp/$name.tar.gz" > "$tmp/members" || err "cannot list archive"
 while IFS= read -r member; do
   member="${member%/}"
+  case "$member" in *[!0-9A-Za-z._+/-]*) err "unsafe archive member: $member" ;; esac
   case "$member" in "$name"|"$name/"|"$name/"*) ;; *) err "unsafe archive member: $member" ;; esac
   case "/$member/" in *"/../"*|*"/./"*|*"//"*) err "unsafe archive member: $member" ;; esac
 done < "$tmp/members"
 tar -tvzf "$tmp/$name.tar.gz" > "$tmp/member-types" || err "cannot inspect archive types"
-awk 'substr($0,1,1) != "-" && substr($0,1,1) != "d" { bad=1 } END { exit bad }' "$tmp/member-types" || err "archive contains links or special files"
+awk -v root="$name" '
+  {
+    type = substr($0, 1, 1)
+    if (type != "-" && type != "d" && type != "h") bad = 1
+    if (type == "h" || / link to /) {
+      target = $NF
+      if (!/ link to / || (target != root && index(target, root "/") != 1) ||
+          target ~ /[^0-9A-Za-z._+\/-]/ || target ~ /(^|\/)\.\.?($|\/)/ || target ~ /\/\//) bad = 1
+    }
+  }
+  END { exit bad }
+' "$tmp/member-types" || err "archive contains unsafe links or special files"
 echo "pgx installer: extracting ..."
 tar --no-same-owner -xzf "$tmp/$name.tar.gz" -C "$tmp" || err "extract failed"
 [ -x "$tmp/$name/bin/pgx" ] || err "archive does not contain bin/pgx"
