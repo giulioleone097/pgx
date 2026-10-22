@@ -8,7 +8,7 @@ engine (`engine_commit=d62547da71`) and PostgreSQL 18.6 regression tools.
 | Settings | Scheduled/reported | Byte-exact | EXPLAIN only | Semantic | Gate |
 |---|---|---|---|---|---|
 | Published engine, stock configuration, worker limits 8/2 | 231 / 231 | 219 | 12 | 0 | Pass |
-| Patched engine, same stock settings | 231 / 231 | 219 | 12 | 0 | Pass |
+| Final source-exact patched engine, same stock settings | 231 / 231 | 219 | 12 | 0 | Pass |
 | `configs/pgx-ephemeral.conf` | 231 / 231 | 223 | 6 | 2 | Fail |
 
 In `stats`, the changed boolean is specifically
@@ -43,7 +43,7 @@ python3 benchmarks/pgx/classify-regress-diffs.py /tmp/regress-ephemeral
 # Expected nonzero: the two profile assumptions above differ from stock PG.
 ```
 
-The patched engine was independently rebuilt and the complete 231-test run
+The final source-exact patched engine was independently rebuilt and the complete 231-test run
 repeated with the same strict gate: 219 exact, 12 plan-only, zero semantic
 differences and no missing tests or server crash. Its SHA-256 is recorded with
 the results so this evidence identifies the executed binary.

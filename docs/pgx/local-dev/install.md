@@ -7,17 +7,28 @@ Docker image).
 
 ## One-line install
 
+The installer requires curl and GitHub CLI 2.70+ (`gh attestation verify`).
+
 ```sh
 curl -fsSL https://pgx.dev/install | sh
 ```
 
 The installer detects your OS and CPU, downloads the matching release tarball
-and its `.sha256`, **verifies the checksum before installing**, unpacks into
+and its `.sha256` and `.sigstore.json` build-provenance bundle. It verifies the
+checksum and signed artifact digest, repository, exact workflow/source ref and
+hosted runner policy before extracting. It then unpacks into
 `~/.pgx/dist/<version>` and links `pgx` into `~/.local/bin`. It never uses root
 and refuses an unsupported platform or a tampered download.
 
 Environment overrides: `PGX_VERSION`, `PGX_INSTALL_DIR`, `PGX_BIN_DIR`,
-`PGX_BASE_URL`. Ensure `PGX_BIN_DIR` (default `~/.local/bin`) is on your `PATH`.
+`PGX_BASE_URL` (HTTPS). Ensure `PGX_BIN_DIR` (default `~/.local/bin`) is on your
+`PATH`. The installer preserves an unrelated existing `pgx` executable or link;
+`PGX_FORCE=1` explicitly permits replacing it.
+
+Older releases without a provenance bundle require the explicit
+`PGX_INSECURE_SKIP_VERIFY=1` override. That selects checksum-only installation
+and disables the authenticity check; current signed releases use verification
+by default. `PGX_INSECURE_ALLOW_HTTP=1` is reserved for local installer tests.
 
 Then get a database in one step:
 
@@ -31,13 +42,20 @@ time; it never resets your data.
 
 ## From a release tarball
 
-Download `pgx-<version>-<os>-<arch>.tar.gz`, verify it against `checksums.txt`,
-extract anywhere, and run `bin/pgx`.
+Download the matching `pgx-<version>-<os>-<arch>.tar.gz`, its `.sha256`, and
+its `.sigstore.json` bundle from the same release. With the files in one directory,
+set the asset/version below and verify before extracting:
 
 ```sh
-shasum -a 256 -c pgx-<version>-<os>-<arch>.tar.gz.sha256
-tar -xzf pgx-<version>-<os>-<arch>.tar.gz
-./pgx-<version>-<os>-<arch>/bin/pgx version
+asset="pgx-<version>-<os>-<arch>.tar.gz"
+ref="refs/tags/v<version>" # refs/heads/main for a workflow_dispatch build
+shasum -a 256 -c "$asset.sha256"
+gh attestation verify "$asset" --bundle "$asset.sigstore.json" \
+  --repo pgrundev/pgx \
+  --cert-identity "https://github.com/pgrundev/pgx/.github/workflows/release.yml@$ref" \
+  --source-ref "$ref" --deny-self-hosted-runners
+tar --no-same-owner -xzf "$asset"
+"./${asset%.tar.gz}/bin/pgx" version
 ```
 
 ## Docker
@@ -52,9 +70,8 @@ that reaps processes.
 
 ## From source
 
-See the repository README "Quickstart → Build": the Rust toolchain (pinned by
-`rust-toolchain.toml`), RE2, and PostgreSQL 18 client tools, then
-`cargo build --release --bin postgres --bin pgx` and `dist/assemble.sh`.
+See [CONTRIBUTING.md](../../../CONTRIBUTING.md) for the pinned Rust toolchain,
+RE2, PostgreSQL 18 tools, assembly, and verification commands.
 
 ## Supported platforms
 
