@@ -13,6 +13,24 @@ use std::time::{Duration, Instant};
 pub const STACK_BYTES: u64 = 65520 * 1024;
 pub const RUST_MIN_STACK: &str = "33554432";
 
+/// Only libc calls: safe to call from Command::pre_exec after fork as well as
+/// before launching the foreground engine.
+pub fn raise_stack_limit() {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    if unsafe { libc::getrlimit(libc::RLIMIT_STACK, &mut limit) } == 0 {
+        let wanted = STACK_BYTES as libc::rlim_t;
+        if limit.rlim_cur < wanted
+            && (limit.rlim_max == libc::RLIM_INFINITY || limit.rlim_max >= wanted)
+        {
+            limit.rlim_cur = wanted;
+            unsafe { libc::setrlimit(libc::RLIMIT_STACK, &limit) };
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PidFile {
     pub pid: u32,
@@ -294,18 +312,7 @@ pub fn spawn(
     unsafe {
         cmd.pre_exec(|| {
             libc::setsid();
-            let mut rl = libc::rlimit {
-                rlim_cur: 0,
-                rlim_max: 0,
-            };
-            if libc::getrlimit(libc::RLIMIT_STACK, &mut rl) == 0 {
-                let want = STACK_BYTES as libc::rlim_t;
-                if rl.rlim_cur < want && (rl.rlim_max == libc::RLIM_INFINITY || rl.rlim_max >= want)
-                {
-                    rl.rlim_cur = want;
-                    libc::setrlimit(libc::RLIMIT_STACK, &rl);
-                }
-            }
+            raise_stack_limit();
             Ok(())
         });
     }

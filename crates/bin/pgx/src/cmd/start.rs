@@ -5,7 +5,6 @@ use crate::cmd::init::port_check;
 use crate::errors::{PgxError, Result};
 use crate::out::Out;
 use crate::{conf, fsdetect, process};
-use std::os::fd::AsRawFd;
 use std::time::Duration;
 
 /// Serialises concurrent `pgx start`s on one home: the second waits for the
@@ -20,19 +19,7 @@ impl StartLock {
     pub fn acquire_home(home: &crate::layout::Home) -> Result<StartLock> {
         crate::fsutil::private_dir(&home.root)?;
         let path = home.root.join("start.lock");
-        let f = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .open(&path)
-            .map_err(|e| PgxError::io("cannot open", &path, &e))?;
-        if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            return Err(PgxError::failure(format!(
-                "cannot lock {}: {}",
-                path.display(),
-                std::io::Error::last_os_error()
-            )));
-        }
+        let f = crate::fsutil::lock_file(&path, true)?.expect("blocking lock acquired");
         Ok(StartLock(f))
     }
 }
@@ -310,17 +297,7 @@ fn exec_engine_foreground(
 ) -> Result<ExitCode> {
     use std::os::unix::process::CommandExt;
     // Raise the stack soft limit for the engine, like process::spawn does.
-    let mut rl = libc::rlimit {
-        rlim_cur: 0,
-        rlim_max: 0,
-    };
-    if unsafe { libc::getrlimit(libc::RLIMIT_STACK, &mut rl) } == 0 {
-        let want = crate::process::STACK_BYTES as libc::rlim_t;
-        if rl.rlim_cur < want && (rl.rlim_max == libc::RLIM_INFINITY || rl.rlim_max >= want) {
-            rl.rlim_cur = want;
-            unsafe { libc::setrlimit(libc::RLIMIT_STACK, &rl) };
-        }
-    }
+    crate::process::raise_stack_limit();
     let err = std::process::Command::new(&install.engine)
         .args(crate::process::engine_args(home, cfg, sock_dir))
         .envs(crate::process::engine_env(install))

@@ -10,7 +10,6 @@ use crate::errors::{PgxError, Result};
 use crate::layout::Home;
 use crate::out::Out;
 use crate::ttlstore::{MetaStore, State, TtlRecord};
-use std::os::fd::AsRawFd;
 use std::time::Duration;
 
 const DEFAULT_INTERVAL_SECS: u64 = 5;
@@ -27,16 +26,10 @@ pub fn run(out: &Out) -> Result<ExitCode> {
     // Single instance: hold an exclusive, non-blocking lock for our whole life.
     // A second supervisor simply exits, so start/run/serve may spawn freely.
     let lock_path = home.root.join("supervisor.lock");
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(&lock_path)
-        .map_err(|e| PgxError::io("cannot open", &lock_path, &e))?;
-    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+    let Some(_lock) = crate::fsutil::lock_file(&lock_path, false)? else {
         out.note("pgx supervise: another supervisor is already running; exiting");
         return Ok(ExitCode::Ok);
-    }
+    };
     let pid_path = home.root.join("supervisor.pid");
     std::fs::write(&pid_path, std::process::id().to_string())
         .map_err(|e| PgxError::io("cannot write supervisor pid", &pid_path, &e))?;

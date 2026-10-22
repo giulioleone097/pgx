@@ -222,10 +222,7 @@ fn ttl_checks(home: &Home, running: bool) -> Vec<Check> {
     checks
 }
 
-pub fn run(out: &Out) -> Result<ExitCode> {
-    let mut checks: Vec<Check> = Vec::new();
-    let home = Home::resolve();
-
+fn installation_checks(checks: &mut Vec<Check>) {
     // Installation.
     let install = match Install::discover() {
         Ok(i) => Some(i),
@@ -288,7 +285,9 @@ pub fn run(out: &Out) -> Result<ExitCode> {
             )),
         }
     }
+}
 
+fn data_checks(home: &Home, checks: &mut Vec<Check>) -> Option<Config> {
     // Data directory and config.
     let initialized = home.is_initialized();
     if initialized {
@@ -353,12 +352,20 @@ pub fn run(out: &Out) -> Result<ExitCode> {
         None
     };
 
+    config
+}
+
+fn runtime_checks(
+    home: &Home,
+    config: Option<&Config>,
+    checks: &mut Vec<Check>,
+) -> (std::path::PathBuf, Option<u32>) {
+    let initialized = home.is_initialized();
     // Socket path, runtime, port.
     let sock_dir = config
-        .as_ref()
         .and_then(|c| c.run_dir.clone())
         .unwrap_or_else(|| home.run.clone());
-    let port = config.as_ref().map(|c| c.port).unwrap_or(5432);
+    let port = config.map(|c| c.port).unwrap_or(5432);
     let len = socket_path_len(&sock_dir, port);
     if len > MAX_SOCKET_PATH {
         checks.push(fail(
@@ -409,11 +416,10 @@ pub fn run(out: &Out) -> Result<ExitCode> {
         ));
     }
 
-    // TTL management.
-    if initialized {
-        checks.extend(ttl_checks(&home, running_pid.is_some()));
-    }
+    (sock_dir, running_pid)
+}
 
+fn host_checks(home: &Home, checks: &mut Vec<Check>) {
     // Host resources.
     let probe_dir = if home.data.is_dir() {
         home.data.clone()
@@ -472,12 +478,20 @@ pub fn run(out: &Out) -> Result<ExitCode> {
             "APFS, ZFS, btrfs or XFS with reflinks make clones copy-on-write",
         ));
     }
+}
 
+fn live_checks(
+    home: &Home,
+    config: Option<&Config>,
+    sock_dir: &Path,
+    running_pid: Option<u32>,
+    checks: &mut Vec<Check>,
+) {
     // Libraries, orphan directories and log, when running.
-    if let (Some(pid), Some(cfg)) = (running_pid, config.as_ref()) {
+    if let (Some(pid), Some(cfg)) = (running_pid, config) {
         let _ = pid;
         match crate::pgwire::Client::connect_unix(
-            &sock_dir,
+            sock_dir,
             cfg.port,
             "postgres",
             "postgres",
@@ -545,8 +559,11 @@ pub fn run(out: &Out) -> Result<ExitCode> {
             )),
         }
     }
+}
+
+fn log_check(home: &Home, checks: &mut Vec<Check>) {
     if home.log_file.exists() {
-        let tail = process::log_tail(&home, 200);
+        let tail = process::log_tail(home, 200);
         let bad: Vec<&str> = tail
             .lines()
             .filter(|l| l.contains("PANIC") || l.contains("FATAL"))
@@ -572,6 +589,20 @@ pub fn run(out: &Out) -> Result<ExitCode> {
             ));
         }
     }
+}
+
+pub fn run(out: &Out) -> Result<ExitCode> {
+    let mut checks = Vec::new();
+    let home = Home::resolve();
+    installation_checks(&mut checks);
+    let config = data_checks(&home, &mut checks);
+    let (sock_dir, running_pid) = runtime_checks(&home, config.as_ref(), &mut checks);
+    if home.is_initialized() {
+        checks.extend(ttl_checks(&home, running_pid.is_some()));
+    }
+    host_checks(&home, &mut checks);
+    live_checks(&home, config.as_ref(), &sock_dir, running_pid, &mut checks);
+    log_check(&home, &mut checks);
 
     let any_fail = checks.iter().any(|c| c.status == "fail");
     let mut text = String::new();

@@ -161,26 +161,10 @@ impl MetaStore {
     }
 
     pub fn lock(&self, name: &str) -> Result<RecordLock> {
-        use std::os::fd::AsRawFd;
-        use std::os::unix::fs::OpenOptionsExt;
         let locks = self.dir.with_file_name("ttl-locks");
         crate::fsutil::private_dir(&locks)?;
         let path = locks.join(format!("{}.lock", file_stem(name)));
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&path)
-            .map_err(|e| PgxError::io("cannot open TTL lock", &path, &e))?;
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            return Err(PgxError::io(
-                "cannot lock",
-                &path,
-                &std::io::Error::last_os_error(),
-            ));
-        }
+        let file = crate::fsutil::lock_file(&path, true)?.expect("blocking lock acquired");
         Ok(RecordLock(file))
     }
 

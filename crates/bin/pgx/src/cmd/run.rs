@@ -3,13 +3,12 @@
 //! step is idempotent, so repeating `pgx run` is safe and never resets data.
 use super::Ctx;
 use crate::cli::ExitCode;
-use crate::errors::{PgxError, Result};
+use crate::errors::Result;
 use crate::layout::Home;
 use crate::names;
 use crate::out::Out;
 use crate::pgwire::quote_literal;
 use serde_json::json;
-use std::os::fd::AsRawFd;
 
 /// The database `pgx run` ensures exists.
 pub const DEFAULT_DB: &str = "app";
@@ -21,19 +20,7 @@ pub const DEFAULT_DB: &str = "app";
 pub(super) fn acquire_run_lock(home: &Home) -> Result<std::fs::File> {
     crate::fsutil::private_dir(&home.root)?;
     let path = home.root.join("run.lock");
-    let f = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(&path)
-        .map_err(|e| PgxError::io("cannot open", &path, &e))?;
-    if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } != 0 {
-        return Err(PgxError::failure(format!(
-            "cannot lock {}: {}",
-            path.display(),
-            std::io::Error::last_os_error()
-        )));
-    }
+    let f = crate::fsutil::lock_file(&path, true)?.expect("blocking lock acquired");
     Ok(f)
 }
 

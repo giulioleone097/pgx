@@ -2,6 +2,30 @@
 use crate::errors::{PgxError, Result};
 use std::path::Path;
 
+/// Open and hold an advisory file lock. A busy non-blocking lock is None;
+/// filesystem errors remain errors rather than masquerading as another worker.
+pub fn lock_file(path: &Path, blocking: bool) -> Result<Option<std::fs::File>> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|e| PgxError::io("cannot open lock", path, &e))?;
+    let operation = libc::LOCK_EX | if blocking { 0 } else { libc::LOCK_NB };
+    if unsafe { libc::flock(file.as_raw_fd(), operation) } != 0 {
+        let error = std::io::Error::last_os_error();
+        if !blocking && error.raw_os_error() == Some(libc::EWOULDBLOCK) {
+            return Ok(None);
+        }
+        return Err(PgxError::io("cannot lock", path, &error));
+    }
+    Ok(Some(file))
+}
+
 /// Create a private directory, or secure an existing directory owned by us.
 /// Opening without following the final symlink prevents chmod/socket use of an
 /// attacker-supplied path. Reject writable ancestors (except sticky directories
@@ -15,7 +39,7 @@ pub fn private_dir(path: &Path) -> Result<()> {
         }
         if let Ok(meta) = std::fs::metadata(parent) {
             if meta.mode() & 0o022 != 0
-                && !((meta.uid() == 0 || meta.uid() == uid) && meta.mode() & libc::S_ISVTX != 0)
+                && !((meta.uid() == 0 || meta.uid() == uid) && meta.mode() & 0o1000 != 0)
             {
                 return Err(PgxError::failure(format!(
                     "unsafe writable parent directory {}",
