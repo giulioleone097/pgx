@@ -243,7 +243,11 @@ impl MetaStore {
     pub fn remove(&self, name: &str) -> Result<()> {
         let path = self.path_for(name);
         match std::fs::remove_file(&path) {
-            Ok(()) => Ok(()),
+            Ok(()) => std::fs::File::open(&self.dir)
+                .and_then(|f| f.sync_all())
+                .map_err(|e| {
+                    PgxError::io("cannot sync TTL directory after removal", &self.dir, &e)
+                }),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(PgxError::io("cannot remove", &path, &e)),
         }

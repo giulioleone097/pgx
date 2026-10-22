@@ -164,6 +164,20 @@ fn canonical_home_identity_keeps_the_live_pidfile() {
 }
 
 #[test]
+fn home_paths_with_spaces_preserve_engine_and_supervisor_identity() {
+    let mut p = Pgx::new();
+    p.home = p.home.join("My PGX");
+    std::fs::create_dir_all(&p.home).unwrap();
+    p.init_ok();
+    p.start_ok();
+    assert!(p.wait_supervisor(5));
+    assert_eq!(p.psql("postgres", "SELECT 42").stdout.trim(), "42");
+    assert_eq!(p.run(&["status"]).code, 0);
+    p.stop_ok();
+    assert!(!p.home.join("supervisor.pid").exists());
+}
+
+#[test]
 fn authentication_readiness_failure_is_immediate_and_keeps_engine_alive() {
     let p = Pgx::new();
     p.init_ok();
