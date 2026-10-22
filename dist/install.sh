@@ -52,13 +52,7 @@ case "$API_URL" in https://*|http://*) ;; *) err "invalid API URL" ;; esac
 proto="=https"
 [ "${PGX_INSECURE_ALLOW_HTTP:-}" != 1 ] || proto="=http,https"
 if have curl; then dl() { curl --proto "$proto" --proto-redir "$proto" --tlsv1.2 -fsSL "$1" -o "$2"; }; dlout() { curl --proto "$proto" --proto-redir "$proto" --tlsv1.2 -fsSL "$1"; }
-elif have wget; then
-  if [ "${PGX_INSECURE_ALLOW_HTTP:-}" = 1 ]; then
-    dl() { wget --secure-protocol=TLSv1_2 -qO "$2" "$1"; }; dlout() { wget --secure-protocol=TLSv1_2 -qO- "$1"; }
-  else
-    dl() { wget --https-only --secure-protocol=TLSv1_2 -qO "$2" "$1"; }; dlout() { wget --https-only --secure-protocol=TLSv1_2 -qO- "$1"; }
-  fi
-else err "need curl or wget"; fi
+else err "need curl to enforce HTTPS-only redirects"; fi
 
 version="${PGX_VERSION:-}"
 if [ -z "$version" ]; then
@@ -103,11 +97,23 @@ else err "need sha256sum or shasum to verify the download"; fi
 if [ "${PGX_INSECURE_SKIP_VERIFY:-}" = 1 ]; then
   echo "pgx installer: WARNING: signed build provenance verification explicitly disabled" >&2
 else
-  have gh || err "need GitHub CLI with 'gh attestation verify' (>=2.49) to verify signed provenance"
+  have gh || err "need GitHub CLI with 'gh attestation verify' (>=2.70) to verify signed provenance"
   dl "$url.sigstore.json" "$tmp/bundle.json" || err "signed provenance download failed (legacy releases require PGX_INSECURE_SKIP_VERIFY=1)"
-  gh attestation verify "$tmp/$name.tar.gz" --bundle "$tmp/bundle.json" \
-    --repo "$REPO" --signer-workflow "$REPO/.github/workflows/release.yml" \
-    --deny-self-hosted-runners >/dev/null || err "signed build provenance verification failed; refusing to install"
+  verify_provenance() {
+    # The workflow path alone is insufficient: a modified copy on a feature
+    # branch can request OIDC too. Accept the requested release tag or main
+    # (the supported workflow_dispatch source), with matching certificate/ref.
+    ref="$1"
+    gh attestation verify "$tmp/$name.tar.gz" --bundle "$tmp/bundle.json" \
+      --repo "$REPO" \
+      --cert-identity "https://github.com/$REPO/.github/workflows/release.yml@$ref" \
+      --source-ref "$ref" --deny-self-hosted-runners
+  }
+  if ! verify_provenance "refs/tags/v$version" >"$tmp/verify.log" 2>&1 &&
+     ! verify_provenance refs/heads/main >>"$tmp/verify.log" 2>&1; then
+    cat "$tmp/verify.log" >&2
+    err "signed build provenance verification failed; refusing to install"
+  fi
 fi
 
 # Distribution members must stay inside the named root. Hardlinks produced
@@ -126,7 +132,8 @@ awk -v root="$name" '
     type = substr($0, 1, 1)
     if (type != "-" && type != "d" && type != "h") bad = 1
     if (type == "h" || / link to /) {
-      target = $NF
+      marker = index($0, " link to ")
+      target = substr($0, marker + length(" link to "))
       if (!/ link to / || (target != root && index(target, root "/") != 1) ||
           target ~ /[^0-9A-Za-z._+\/-]/ || target ~ /(^|\/)\.\.?($|\/)/ || target ~ /\/\//) bad = 1
     }

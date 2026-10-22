@@ -5,7 +5,7 @@ development, CI and disposable databases. No system PostgreSQL required.
 
 ## Install
 
-Requires GitHub CLI 2.49+ (`gh attestation verify`) for signed provenance.
+Requires GitHub CLI 2.70+ (`gh attestation verify`) for signed provenance.
 
 ```sh
 curl -fsSL https://pgx.dev/install | sh
@@ -17,11 +17,12 @@ Or download the tarball for your platform below, verify its SHA-256 against
 the corresponding `.sha256`, and verify its signed provenance before extracting:
 
 ```sh
+REF="refs/tags/v<version>" # refs/heads/main for a workflow_dispatch build
 gh attestation verify pgx-<version>-<os>-<arch>.tar.gz \
   --bundle pgx-<version>-<os>-<arch>.tar.gz.sigstore.json \
   --repo pgrundev/pgx \
-  --signer-workflow pgrundev/pgx/.github/workflows/release.yml \
-  --deny-self-hosted-runners
+  --cert-identity "https://github.com/pgrundev/pgx/.github/workflows/release.yml@$REF" \
+  --source-ref "$REF" --deny-self-hosted-runners
 ```
 
 `bin/pgx` is relocatable.

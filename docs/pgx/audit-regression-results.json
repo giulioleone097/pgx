@@ -57,5 +57,36 @@
     "gate_passed": false,
     "engine_commit": "d62547da71",
     "binary_source": "Published pgx 0.1.0 linux-amd64 artifact; same engine for both runs"
+  },
+  "patched_stock": {
+    "summary": {
+      "scheduled": 231,
+      "reported": 231,
+      "byte_exact_pass": 219,
+      "order_only_diff": 0,
+      "real_diff": 12,
+      "not_reported": [],
+      "pg_regress_exit_code": 1,
+      "server_died_during_run": false,
+      "elapsed_s": 50.8
+    },
+    "plan_only": [
+      "create_index",
+      "incremental_sort",
+      "join",
+      "limit",
+      "memoize",
+      "partition_aggregate",
+      "partition_join",
+      "partition_prune",
+      "portals",
+      "select_distinct",
+      "subselect",
+      "tidscan"
+    ],
+    "semantic": [],
+    "gate_passed": true,
+    "binary_sha256": "525672137fc2e10a12699574d55840db6375ccfc48c354600289ae32397ca630",
+    "binary_source": "Patched engine built from the audit fixes in this change; immutable copy used for this run"
   }
 }

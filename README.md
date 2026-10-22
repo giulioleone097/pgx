@@ -12,6 +12,8 @@
   <a href="LICENSE"><img alt="License: AGPL-3.0" src="https://img.shields.io/badge/license-AGPL--3.0-blue"></a>
 </p>
 
+The installer requires curl and GitHub CLI 2.70+ to verify signed build provenance.
+
 ```bash
 curl -fsSL https://pgx.dev/install | sh
 pgx run
@@ -319,7 +321,8 @@ branch management. PGX is the runtime. They are separate projects.
 ## Quickstart
 
 Install PGX and create your first database. No system PostgreSQL required; the
-distribution is self-contained and relocatable.
+distribution is self-contained and relocatable. The installer uses curl and
+GitHub CLI 2.70+ for signed provenance verification.
 
 ```bash
 curl -fsSL https://pgx.dev/install | sh
