@@ -84,7 +84,8 @@ fn run_json_is_one_object_with_connection_url() {
 #[test]
 fn run_preserves_data_across_restart() {
     let p = Pgx::new();
-    assert_eq!(p.run_cmd(&[]).code, 0);
+    let r = p.run_cmd(&[]);
+    assert_eq!(r.code, 0, "{}\n{}", r.all(), p.log_tail());
     assert_eq!(
         p.psql(
             "app",
@@ -138,7 +139,8 @@ fn run_never_touches_existing_databases() {
 #[test]
 fn run_defaults_are_localhost_only_and_password_protected() {
     let p = Pgx::new();
-    assert_eq!(p.run_cmd(&[]).code, 0);
+    let r = p.run_cmd(&[]);
+    assert_eq!(r.code, 0, "{}\n{}", r.all(), p.log_tail());
     let hba = std::fs::read_to_string(p.home.join("data/pg_hba.conf")).unwrap();
     assert!(
         !hba.contains("0.0.0.0"),
@@ -196,9 +198,38 @@ fn concurrent_runs_make_one_engine_and_one_app() {
 }
 
 #[test]
+fn independent_runs_have_distinct_ports_and_accept_tcp_connections() {
+    // Unlike concurrent invocations on ONE home, these engines must bind
+    // different ports while their neighbours bootstrap and make TCP queries.
+    let barrier = std::sync::Barrier::new(8);
+    std::thread::scope(|scope| {
+        let jobs: Vec<_> = (0..8)
+            .map(|_| {
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    let p = Pgx::new();
+                    barrier.wait();
+                    let r = p.run_cmd(&[]);
+                    assert_eq!(r.code, 0, "{}\n{}", r.all(), p.log_tail());
+                    let r = p.psql_tcp("app", &p.password(), "SELECT 1");
+                    assert_eq!(r.code, 0, "{}\n{}", r.all(), p.log_tail());
+                    assert_eq!(r.stdout.trim(), "1");
+                    p.port
+                })
+            })
+            .collect();
+        let mut ports: Vec<_> = jobs.into_iter().map(|j| j.join().unwrap()).collect();
+        ports.sort_unstable();
+        ports.dedup();
+        assert_eq!(ports.len(), 8, "each runtime needs its own port: {ports:?}");
+    });
+}
+
+#[test]
 fn run_recovers_after_an_engine_crash() {
     let p = Pgx::new();
-    assert_eq!(p.run_cmd(&[]).code, 0);
+    let r = p.run_cmd(&[]);
+    assert_eq!(r.code, 0, "{}\n{}", r.all(), p.log_tail());
     assert_eq!(p.psql("app", "SELECT 1").stdout.trim(), "1");
 
     // Simulate a crash: SIGKILL the engine, leaving a stale postmaster.pid and
