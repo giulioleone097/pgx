@@ -97,7 +97,7 @@ jobs:
         run: |
           python3 -I tests/pgx/test_sql.py
           python3 -I tests/pgx/test_features.py
-          cargo test -p pgx --release --test lifecycle --test databases --test clone --test doctor --test run --test ttl --test hardening
+          cargo test -p pgx --release --test lifecycle --test init_environment --test databases --test clone --test doctor --test run --test ttl --test hardening
       - name: Installer end-to-end
         run: dist/test/install_test.sh
       - name: Installer discovery/version/checksum/download tests

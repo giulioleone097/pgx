@@ -70,5 +70,16 @@ database in use · `7` corrupted or incomplete installation.
 ## Environment
 
 `PGX_HOME` (data home), `PGX_RUN_DIR` (socket directory, for a long `$PGX_HOME`),
-`PGX_PORT` / `PGX_DURABILITY` / `PGX_LISTEN` / `PGX_PASSWORD` (read by `init` and
-`serve`, used by the Docker entrypoint).
+`PGX_PORT` / `PGX_DURABILITY` / `PGX_LISTEN` / `PGX_PASSWORD` are read by
+`init`, and by `run` / `serve` when they initialise a new cluster. Later starts
+use the saved configuration.
+
+For `init`, `--port` and `--durability` take precedence over their corresponding
+environment variables. `PGX_PORT` accepts a number from 1024 to 65535;
+`PGX_DURABILITY` accepts `ephemeral` or `full`. Invalid values fail with usage
+exit code 2 instead of silently falling back. When unset, the port is selected
+from 5432–5500 and durability defaults to `ephemeral`.
+
+```sh
+PGX_PORT=55440 PGX_DURABILITY=full pgx init
+```

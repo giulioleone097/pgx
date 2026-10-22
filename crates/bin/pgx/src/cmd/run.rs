@@ -40,9 +40,7 @@ pub fn run(out: &Out) -> Result<ExitCode> {
         false
     } else {
         out.note("initialising a new PGX cluster…");
-        let port = std::env::var("PGX_PORT").ok().and_then(|p| p.parse().ok());
-        let durability = std::env::var("PGX_DURABILITY").ok();
-        crate::cmd::init::run(&quiet, port, durability, false)?;
+        crate::cmd::init::run(&quiet, None, None, false)?;
         true
     };
 

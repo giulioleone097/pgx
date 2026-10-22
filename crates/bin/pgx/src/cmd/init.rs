@@ -66,16 +66,42 @@ pub fn run(
     let install = Install::discover()?;
     install.require_complete()?;
     let home = Home::resolve();
+    // Resolve settings before touching an existing cluster. Explicit flags win
+    // over the environment; every implicit init (run/serve) uses this same path.
+    let port = match port {
+        Some(p) => Some(p),
+        None => match env_setting("PGX_PORT")? {
+            Some(p) => Some(
+                p.parse::<u16>()
+                    .ok()
+                    .filter(|p| *p >= 1024)
+                    .ok_or_else(|| {
+                        PgxError::usage(format!(
+                            "PGX_PORT must be a number between 1024 and 65535, got {p:?}"
+                        ))
+                    })?,
+            ),
+            None => None,
+        },
+    };
+    let durability = match durability {
+        Some(d) => Durability::parse(&d)?,
+        None => match env_setting("PGX_DURABILITY")? {
+            Some(d) => Durability::parse(&d).map_err(|_| {
+                PgxError::usage(format!(
+                    "PGX_DURABILITY must be `ephemeral` or `full`, got {d:?}"
+                ))
+            })?,
+            None => Durability::Ephemeral,
+        },
+    };
+
     let _run_lock = if force {
         Some(super::run::acquire_run_lock(&home)?)
     } else {
         None
     };
     let _start_lock = super::start::StartLock::acquire_home(&home)?;
-    let durability = match durability {
-        Some(d) => Durability::parse(&d)?,
-        None => Durability::Ephemeral,
-    };
 
     if home.data.exists() || home.config_file.exists() {
         if !force {
@@ -222,6 +248,16 @@ pub fn run(
         }),
     );
     Ok(ExitCode::Ok)
+}
+
+fn env_setting(name: &str) -> Result<Option<String>> {
+    match std::env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err(PgxError::usage(format!("{name} must be valid UTF-8")))
+        }
+    }
 }
 
 fn write(path: &Path, text: &str) -> Result<()> {
