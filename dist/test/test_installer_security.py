@@ -7,7 +7,10 @@ These local tests ensure an unavailable/rejecting verifier fails closed.
 import hashlib
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import io
+import json
 import os
+import shutil
+import ssl
 from pathlib import Path
 import subprocess
 import tarfile
@@ -35,7 +38,13 @@ class InstallerSecurity(unittest.TestCase):
         self.release.mkdir(parents=True)
         self.archive = self.release / (self.name + '.tar.gz')
         self.pack()
-        handler = lambda *a, **kw: QuietHandler(*a, directory=str(self.root / 'releases'), **kw)
+        self.http_requests = []
+        requests = self.http_requests
+        class TrackingHandler(QuietHandler):
+            def do_GET(self):
+                requests.append(self.path)
+                super().do_GET()
+        handler = lambda *a, **kw: TrackingHandler(*a, directory=str(self.root / 'releases'), **kw)
         self.server = ThreadingHTTPServer(('127.0.0.1', 0), handler)
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
@@ -70,6 +79,7 @@ class InstallerSecurity(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn(diagnostic, result.stderr)
         self.assertFalse((self.root / 'installed').exists())
+        return result
 
     def test_download_install_and_execute(self):
         result = self.run_install()
@@ -94,6 +104,43 @@ class InstallerSecurity(unittest.TestCase):
         gh.chmod(0o755)
         self.env['PATH'] = str(fake) + os.pathsep + self.env['PATH']
         self.assert_refused('signed build provenance verification failed')
+
+    def test_expected_tag_and_main_verifier_success_install(self):
+        # Synthetic trusted verifier: this checks installer control flow only,
+        # not GitHub OIDC issuance or signature validity.
+        self.env.pop('PGX_INSECURE_SKIP_VERIFY')
+        fake = self.root / 'tools'
+        fake.mkdir()
+        gh = fake / 'gh'
+        gh.write_text('#!/usr/bin/env python3\nimport os, sys\na=sys.argv[1:]\nref=a[a.index("--source-ref")+1]\nidentity=a[a.index("--cert-identity")+1]\nexpected="https://github.com/pgrundev/pgx/.github/workflows/release.yml@" + ref\nsys.exit(0 if ref==os.environ["TRUSTED_TEST_REF"] and identity==expected else 1)\n')
+        gh.chmod(0o755)
+        self.env['PATH'] = str(fake) + os.pathsep + self.env['PATH']
+        for ref in [f'refs/tags/v{self.version}', 'refs/heads/main']:
+            self.env['TRUSTED_TEST_REF'] = ref
+            result = self.run_install()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((self.root / 'bin/pgx').is_symlink())
+
+    def test_verifier_is_bound_to_expected_tag_or_main(self):
+        self.env.pop('PGX_INSECURE_SKIP_VERIFY')
+        fake = self.root / 'tools'
+        fake.mkdir()
+        gh = fake / 'gh'
+        calls = self.root / 'verifier-calls.jsonl'
+        gh.write_text('#!/usr/bin/env python3\nimport json, os, sys\nwith open(os.environ["VERIFIER_CALLS"], "a") as f: f.write(json.dumps(sys.argv[1:]) + "\\n")\nsys.exit(1)\n')
+        gh.chmod(0o755)
+        self.env['PATH'] = str(fake) + os.pathsep + self.env['PATH']
+        self.env['VERIFIER_CALLS'] = str(calls)
+        self.assert_refused('signed build provenance verification failed')
+        invocations = [json.loads(line) for line in calls.read_text().splitlines()]
+        self.assertEqual(len(invocations), 2)
+        expected_refs = [f'refs/tags/v{self.version}', 'refs/heads/main']
+        for args, ref in zip(invocations, expected_refs):
+            self.assertEqual(args[args.index('--source-ref') + 1], ref)
+            self.assertEqual(args[args.index('--cert-identity') + 1], 'https://github.com/pgrundev/pgx/.github/workflows/release.yml@' + ref)
+            self.assertEqual(args[args.index('--repo') + 1], 'pgrundev/pgx')
+            self.assertIn('--deny-self-hosted-runners', args)
+            self.assertNotIn('--signer-workflow', args) # mutually exclusive with exact cert identity
 
     def test_http_refused_without_explicit_override(self):
         self.env.pop('PGX_INSECURE_ALLOW_HTTP')
@@ -125,6 +172,56 @@ class InstallerSecurity(unittest.TestCase):
         info.linkname = '/etc/passwd'
         self.pack(info)
         self.assert_refused('unsafe links or special files')
+
+    def test_wget_only_environment_is_refused(self):
+        tools = self.root / 'wget-only'
+        tools.mkdir()
+        for name in ['sh', 'uname']:
+            (tools / name).symlink_to(shutil.which(name))
+        marker = self.root / 'wget-executed'
+        wget = tools / 'wget'
+        wget.write_text('#!/bin/sh\necho invoked > "' + str(marker) + '"\n')
+        wget.chmod(0o755)
+        self.env['PATH'] = str(tools)
+        self.assert_refused('need curl')
+        self.assertFalse(marker.exists())
+
+    @unittest.skipUnless(shutil.which('openssl'), 'TLS fixture requires openssl')
+    def test_https_to_http_redirect_is_refused(self):
+        key, cert = self.root / 'key.pem', self.root / 'cert.pem'
+        subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', str(key), '-out', str(cert), '-days', '1', '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost'], check=True, capture_output=True)
+        plain_base = self.env['PGX_BASE_URL']
+        tls_requests = []
+        class Redirect(SimpleHTTPRequestHandler):
+            def do_GET(self):
+                tls_requests.append(self.path)
+                self.send_response(302)
+                self.send_header('Location', plain_base + self.path)
+                self.end_headers()
+            def log_message(self, *_):
+                pass
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Redirect)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(cert, key)
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.env['PGX_BASE_URL'] = f'https://localhost:{server.server_port}'
+        self.env['CURL_CA_BUNDLE'] = str(cert)
+        self.env.pop('PGX_INSECURE_ALLOW_HTTP')
+        result = self.assert_refused('download failed')
+        self.assertTrue(tls_requests, 'TLS redirect handler must be reached')
+        self.assertRegex(result.stderr.lower(), r'protocol.*http.*disabled')
+        self.assertEqual(self.http_requests, [], 'HTTP artifact endpoint must never be reached')
+
+    def test_whitespace_hardlink_target_is_refused(self):
+        for target in ['../outside ' + self.name + '/file', '../outside link to ' + self.name + '/file']:
+            info = tarfile.TarInfo(self.name + '/escape')
+            info.type = tarfile.LNKTYPE
+            info.linkname = target
+            self.pack(info)
+            self.assert_refused('unsafe links or special files')
 
     def test_unrelated_binary_is_not_replaced(self):
         target = self.root / 'bin/pgx'

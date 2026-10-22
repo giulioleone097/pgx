@@ -41,9 +41,10 @@ This adds a single route; it does **not** change DNS or other pgx.dev content.
 2. Deploy this Worker with `INSTALL_REF` set to the reviewed full installer commit SHA.
 3. `dist/install.sh` then resolves the release artifacts (its discovery reads the releases list, which includes prereleases).
 
-The installer requires GitHub CLI with `gh attestation verify` (2.49 or newer).
+The installer requires GitHub CLI with `gh attestation verify` (2.70 or newer).
 The release workflow signs provenance through GitHub OIDC; the installer verifies
-the artifact digest, repository, workflow identity and hosted runner policy
+the artifact digest, repository, workflow identity, exact source ref (requested
+version tag or main for workflow_dispatch) and hosted runner policy
 before extracting. Existing releases without provenance require the explicit
 `PGX_INSECURE_SKIP_VERIFY=1` legacy override. Never enable that override in the
 Worker or its public installer response.
