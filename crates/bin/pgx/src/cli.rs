@@ -88,6 +88,10 @@ pub enum Command {
     Supervise {
         home: Option<String>,
     },
+    /// Hidden: restart a failed TTL worker while this runtime is alive.
+    Watch {
+        home: String,
+    },
     Version,
     Help,
 }
@@ -247,6 +251,13 @@ pub fn parse(args: &[String]) -> Result<(Global, Command)> {
             }
             Command::Supervise {
                 home: positional.first().map(|s| s.to_string()),
+            }
+        }
+        "watch" => {
+            only_flags(&[])?;
+            arity(1, "watch <home>")?;
+            Command::Watch {
+                home: positional[0].into(),
             }
         }
         "url" => {

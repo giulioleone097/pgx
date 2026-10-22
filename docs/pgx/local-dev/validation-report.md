@@ -148,7 +148,7 @@ dead; `pgx start` clears a socket lock whose PID is a zombie), which is why the
 suite passes; the residual flakiness is the init-less container perturbing
 timing. On a normal Linux host, under systemd, or with `docker run --init`,
 zombies are reaped and the suite is stable; CI runners (proper init) and the
-image's `pgx serve` (engine is PID 1, no detached children) do not hit it.
+image's `pgx serve` (PGX owns and reaps the engine and TTL worker) do not hit it.
 
 ## 6. Commands
 

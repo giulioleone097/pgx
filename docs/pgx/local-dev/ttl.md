@@ -52,8 +52,16 @@ starts**: the worker's first sweep removes anything already past its deadline.
 (one per runtime, enforced by a lock). It polls every 5 seconds by default
 (`PGX_TTL_INTERVAL` seconds to change it), so an expired database is removed
 within roughly its TTL plus one poll interval. The worker exits when the
-runtime stops and is relaunched on the next start. It uses negligible resources
-(about 2 MB RSS, idle between polls).
+runtime stops and is relaunched on the next start. A small watchdog owns and
+reaps the worker. If the worker crashes or is killed while PGX is running, the
+watchdog replaces it after a one-second backoff; cleanup resumes without another
+CLI invocation. Both processes stop with the runtime. The worker's lock still
+allows only one cleanup sweep at a time.
+
+In `pgx serve`, the foreground PGX process owns the engine and worker separately
+and forwards shutdown signals to the engine. A failed cleanup worker therefore
+cannot trigger the engine's child-process crash handling or disconnect other
+database sessions.
 
 `pgx run` exits after starting everything — the worker keeps running without a
 terminal open.

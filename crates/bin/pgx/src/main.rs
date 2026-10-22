@@ -65,6 +65,7 @@ fn run(global: cli::Global, command: Command) -> Result<ExitCode> {
             }
             cmd::supervise::run(&out)
         }
+        Command::Watch { home } => cmd::watch::run(&out, &home),
         Command::Doctor => cmd::doctor::run(&out),
         other => {
             let home = layout::Home::resolve();
@@ -96,7 +97,8 @@ fn run(global: cli::Global, command: Command) -> Result<ExitCode> {
                 | Command::Run
                 | Command::Doctor
                 | Command::Serve
-                | Command::Supervise { .. } => unreachable!(),
+                | Command::Supervise { .. }
+                | Command::Watch { .. } => unreachable!(),
             }
         }
     }
