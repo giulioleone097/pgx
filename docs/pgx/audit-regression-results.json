@@ -68,7 +68,7 @@
       "not_reported": [],
       "pg_regress_exit_code": 1,
       "server_died_during_run": false,
-      "elapsed_s": 50.8
+      "elapsed_s": 24.3
     },
     "plan_only": [
       "create_index",
@@ -86,7 +86,7 @@
     ],
     "semantic": [],
     "gate_passed": true,
-    "binary_sha256": "525672137fc2e10a12699574d55840db6375ccfc48c354600289ae32397ca630",
-    "binary_source": "Patched engine built from the audit fixes in this change; immutable copy used for this run"
+    "binary_sha256": "98b15515e14acb8b00bad2261f1e9a1ec929a67ecfc8bf97ee2a397bcad6713e",
+    "binary_source": "Final source-exact engine built from all audit fixes; immutable binary copy used for the complete regression run"
   }
 }
