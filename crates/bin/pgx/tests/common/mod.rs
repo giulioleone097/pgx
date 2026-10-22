@@ -12,9 +12,11 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::OnceLock;
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 static PORT_SEQ: AtomicU32 = AtomicU32::new(0);
+static CLI_BINARY: OnceLock<PathBuf> = OnceLock::new();
 
 pub struct Pgx {
     pub prefix: PathBuf,
@@ -121,6 +123,23 @@ pub fn scratch_root() -> PathBuf {
     root
 }
 
+fn immutable_cli() -> &'static Path {
+    CLI_BINARY.get_or_init(|| {
+        // Finish the sole executable copy before ANY harness can spawn a CLI.
+        // With per-harness copies, another test's fork can inherit a writable
+        // descriptor while the copy is in flight. That child holds the writer
+        // until exec closes CLOEXEC descriptors, causing transient ETXTBSY even
+        // after the copying parent has closed its own descriptor.
+        let path = scratch_root().join(format!(".pgx-cli-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path); // an exited process may have reused this PID
+        std::fs::copy(env!("CARGO_BIN_EXE_pgx"), &path).unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        path
+    })
+}
+
 impl Pgx {
     /// A fresh harness: prefix and home created, nothing initialised yet.
     pub fn new() -> Pgx {
@@ -135,7 +154,10 @@ impl Pgx {
         let home = base.join("h");
         std::fs::create_dir_all(prefix.join("bin")).unwrap();
         std::fs::create_dir_all(&home).unwrap();
-        std::fs::copy(env!("CARGO_BIN_EXE_pgx"), prefix.join("bin/pgx")).unwrap();
+        // The cache and prefixes share a scratch filesystem, so hard links also
+        // work when the build target lives on a different volume. Each link
+        // still has its own prefix for installation autodiscovery.
+        std::fs::hard_link(immutable_cli(), prefix.join("bin/pgx")).unwrap();
         std::os::unix::fs::symlink(dist.join("bin/postgres"), prefix.join("bin/postgres")).unwrap();
         std::os::unix::fs::symlink(dist.join("share"), prefix.join("share")).unwrap();
         let (port, lease) = reserve_port();
@@ -245,14 +267,63 @@ impl Pgx {
     pub fn run_cmd(&self, extra: &[&str]) -> Run {
         let mut args = vec!["run"];
         args.extend_from_slice(extra);
-        self.output_retrying(
+        let result = self.output_retrying(
             || {
                 let mut c = self.cmd(&args);
                 c.env("PGX_PORT", self.port.to_string());
                 c
             },
             "pgx run",
-        )
+        );
+        if result.code == 4 {
+            eprintln!("{}", self.port_diagnostics());
+        }
+        result
+    }
+
+    pub fn port_diagnostics(&self) -> String {
+        use std::os::unix::fs::MetadataExt;
+        let mut parts = vec![format!(
+            "port {} conflict, test pid {}, home {}",
+            self.port,
+            std::process::id(),
+            self.home.display()
+        )];
+        for table in ["/proc/net/tcp", "/proc/net/tcp6"] {
+            if let Ok(text) = std::fs::read_to_string(table) {
+                let port = format!(":{:04X}", self.port);
+                parts.extend(
+                    text.lines()
+                        .filter(|l| l.contains(&port))
+                        .map(str::to_string),
+                );
+            }
+        }
+        let lease = scratch_root().join(format!("ports/{}.lock", self.port));
+        if let (Ok(metadata), Ok(locks)) = (
+            std::fs::metadata(lease),
+            std::fs::read_to_string("/proc/locks"),
+        ) {
+            let inode = format!(":{} ", metadata.ino());
+            parts.extend(
+                locks
+                    .lines()
+                    .filter(|l| l.contains(&inode))
+                    .map(str::to_string),
+            );
+        }
+        #[cfg(target_os = "linux")]
+        let output = Command::new("ss")
+            .args(["-tanp", &format!("sport = :{}", self.port)])
+            .output();
+        #[cfg(not(target_os = "linux"))]
+        let output = Command::new("lsof")
+            .args(["-nP", &format!("-iTCP:{}", self.port)])
+            .output();
+        if let Ok(output) = output {
+            parts.push(String::from_utf8_lossy(&output.stdout).into_owned());
+        }
+        parts.join("\n")
     }
 
     /// Spawn `pgx run` without waiting — for concurrency tests.

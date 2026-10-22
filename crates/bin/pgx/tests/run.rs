@@ -226,6 +226,33 @@ fn independent_runs_have_distinct_ports_and_accept_tcp_connections() {
 }
 
 #[test]
+fn direct_spawns_work_during_parallel_harness_creation() {
+    // Exercise direct Command callers too: they bypass output_retrying and
+    // exposed ETXTBSY while neighbouring tests copied fresh executables.
+    std::thread::scope(|scope| {
+        let jobs: Vec<_> = (0..8)
+            .map(|_| {
+                scope.spawn(|| {
+                    for _ in 0..16 {
+                        let p = Pgx::new();
+                        let output = p.cmd(&["--help"]).output().expect("direct pgx exec");
+                        assert!(
+                            output.status.success(),
+                            "{}",
+                            String::from_utf8_lossy(&output.stderr)
+                        );
+                        assert!(String::from_utf8_lossy(&output.stdout).contains("pgx run"));
+                    }
+                })
+            })
+            .collect();
+        for job in jobs {
+            job.join().unwrap();
+        }
+    });
+}
+
+#[test]
 fn run_recovers_after_an_engine_crash() {
     let p = Pgx::new();
     let r = p.run_cmd(&[]);
