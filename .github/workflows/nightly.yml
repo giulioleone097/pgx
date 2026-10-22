@@ -46,6 +46,7 @@ jobs:
         run: |
           python3 -I tests/pgx/test_features.py
           python3 -I tests/pgx/test_parallel_limits.py
+          python3 -I tests/pgx/test_maintenance.py
       - name: Crash recovery (ephemeral)
         id: crash_ephemeral
         if: ${{ !cancelled() && env.PGX_DIST != '' }}
@@ -96,7 +97,7 @@ jobs:
       - name: Workspace unit test baseline
         id: workspace
         if: ${{ !cancelled() && env.PGX_DIST != '' }}
-        run: cargo test --release --locked --workspace --lib
+        run: cargo test --release --locked --workspace --lib --no-fail-fast
       - name: Upload regression evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
