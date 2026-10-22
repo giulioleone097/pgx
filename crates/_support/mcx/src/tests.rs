@@ -2017,6 +2017,20 @@ fn limits_refuse_only_enforced_threads_and_name_the_ceiling() {
     holder.join().unwrap();
     assert_eq!(limits::database_bytes(DB), 0, "an exited thread leaves nothing charged");
 
+    // Runtime's small-session exemption is shared by leader and workers,
+    // not multiplied by worker count. Each thread is below 16MB here.
+    limits::configure(0, 0, 8 * MB);
+    std::thread::spawn(move || {
+        let ctx = MemoryContext::new("runtime-leader");
+        let _v: PgVec<'_, u8> = vec_with_capacity_in(ctx.mcx(), 10 * MB).unwrap();
+        let session = limits::capture_session();
+        std::thread::spawn(move || {
+            let _binding = limits::bind_session(&session);
+            assert!(alloc(8 * MB).is_err(), "runtime floor must use the aggregate session");
+            assert!(alloc(MB).is_ok(), "the small-session exemption still applies below 16MB");
+        }).join().unwrap();
+    }).join().unwrap();
+
     limits::configure(0, 0, 0);
 }
 
