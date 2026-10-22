@@ -97,7 +97,7 @@ jobs:
         run: |
           python3 -I tests/pgx/test_sql.py
           python3 -I tests/pgx/test_features.py
-          cargo test -p pgx --release --test lifecycle --test init_environment --test databases --test clone --test doctor --test run --test ttl --test hardening
+          cargo test -p pgx --release --test lifecycle --test init_environment --test databases --test clone --test doctor --test run --test ttl --test hardening --test hardening_races
       - name: Repeated native ARM64 startup gate
         if: matrix.os == 'ubuntu-24.04-arm'
         run: sh tests/pgx/repeat_run.sh

@@ -28,10 +28,17 @@ fn stale_supervisor_pid_never_signals_an_unrelated_process() {
     let p = Pgx::new();
     p.init_ok();
     let mut child = Command::new("sleep").arg("60").spawn().unwrap();
-    std::fs::write(p.home.join("supervisor.pid"), child.id().to_string()).unwrap();
-    // Even a held lock is insufficient without matching executable/home argv.
-    let lock = std::fs::File::create(p.home.join("supervisor.lock")).unwrap();
-    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+    // Neither worker nor watchdog pidfiles authorize a signal, even when their
+    // corresponding lock is held, without matching executable/home argv.
+    let _locks: Vec<_> = ["supervisor", "watchdog"]
+        .into_iter()
+        .map(|name| {
+            std::fs::write(p.home.join(format!("{name}.pid")), child.id().to_string()).unwrap();
+            let lock = std::fs::File::create(p.home.join(format!("{name}.lock"))).unwrap();
+            assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+            lock
+        })
+        .collect();
     let stopped = p.run(&["stop"]);
     let survived = child.try_wait().unwrap().is_none();
     child.kill().unwrap();

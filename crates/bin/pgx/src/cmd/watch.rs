@@ -78,7 +78,10 @@ fn spawn_worker(home: &Home) -> Result<Child> {
 fn worker_locked(home: &Home) -> bool {
     // Only EWOULDBLOCK establishes a live owner; permission and filesystem
     // errors remain visible in the worker's own startup error output.
-    matches!(crate::fsutil::lock_file(&home.root.join("supervisor.lock"), false), Ok(None))
+    matches!(
+        crate::fsutil::lock_file(&home.root.join("supervisor.lock"), false),
+        Ok(None)
+    )
 }
 
 fn stop_child(child: &mut Child) {
@@ -195,30 +198,17 @@ pub fn stop(home: &Home) {
         Err(_) => return,
     };
     if probe.is_none() {
-        let pid_path = home.root.join("watchdog.pid");
-        let pid = std::fs::read_to_string(&pid_path)
-            .ok()
-            .and_then(|s| s.trim().parse::<u32>().ok());
-        if let Some(pid) = pid.filter(|p| *p > 1) {
-            let root = std::fs::canonicalize(&home.root).unwrap_or_else(|_| home.root.clone());
-            let Ok(exe) = std::env::current_exe() else {
-                return;
-            };
-            let expected = format!("{} watch {}", exe.display(), root.display());
-            if crate::process::pid_alive(pid)
-                && crate::process::command_line(pid).is_some_and(|s| s.trim_end() == expected)
-            {
-                unsafe {
-                    libc::kill(pid as i32, libc::SIGTERM);
-                }
-                let deadline = Instant::now() + Duration::from_secs(4);
-                while crate::process::pid_alive(pid) && Instant::now() < deadline {
-                    std::thread::sleep(Duration::from_millis(25));
-                }
+        if let Some(pid) = crate::process::watchdog_pid(home) {
+            unsafe {
+                libc::kill(pid as i32, libc::SIGTERM);
+            }
+            let deadline = Instant::now() + Duration::from_secs(4);
+            while crate::process::pid_alive(pid) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(25));
             }
         }
         return;
-    };
+    }
     let _ = std::fs::remove_file(home.root.join("watchdog.pid"));
     drop(probe);
 }

@@ -187,23 +187,28 @@ fn same_path(a: &Path, b: &Path) -> bool {
 /// A pidfile alone is never authority to signal a process: PIDs are reused.
 /// Check the singleton lock and the exact executable, command and home argv.
 pub fn supervisor_pid(home: &Home) -> Option<u32> {
-    use std::os::fd::AsRawFd;
-    let pid = std::fs::read_to_string(home.root.join("supervisor.pid"))
+    background_pid(home, "supervisor", "supervise")
+}
+
+pub fn watchdog_pid(home: &Home) -> Option<u32> {
+    background_pid(home, "watchdog", "watch")
+}
+
+fn background_pid(home: &Home, name: &str, command: &str) -> Option<u32> {
+    let pid = std::fs::read_to_string(home.root.join(format!("{name}.pid")))
         .ok()?
         .trim()
         .parse()
         .ok()?;
-    if !pid_alive(pid) {
+    if pid <= 1 || pid > i32::MAX as u32 || !pid_alive(pid) {
         return None;
     }
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .open(home.root.join("supervisor.lock"))
-        .ok()?;
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-        return None;
-    }
-    if std::io::Error::last_os_error().raw_os_error() != Some(libc::EWOULDBLOCK) {
+    // A held singleton lock is necessary, but PID/executable/home checks below
+    // also prevent stale metadata from authorizing a signal to another process.
+    if !matches!(
+        crate::fsutil::lock_file(&home.root.join(format!("{name}.lock")), false),
+        Ok(None)
+    ) {
         return None;
     }
     let root = std::fs::canonicalize(&home.root).ok()?;
@@ -219,14 +224,17 @@ pub fn supervisor_pid(home: &Home) -> Option<u32> {
             .split(|b| *b == 0)
             .filter(|arg| !arg.is_empty())
             .collect();
-        if args.len() != 3 || args[1] != b"supervise" || args[2] != root.as_os_str().as_bytes() {
+        if args.len() != 3
+            || args[1] != command.as_bytes()
+            || args[2] != root.as_os_str().as_bytes()
+        {
             return None;
         }
     }
     #[cfg(not(target_os = "linux"))]
     {
         let cmd = command_line(pid)?;
-        if cmd != format!("{} supervise {}", exe.display(), root.display()) {
+        if cmd != format!("{} {command} {}", exe.display(), root.display()) {
             return None;
         }
     }

@@ -78,8 +78,11 @@ fn stop_automatic_supervisor(p: &Pgx) {
             "watchdog releases its singleton lock",
         );
     }
-    let pid = p.supervisor_pid().unwrap();
-    assert_eq!(unsafe { libc::kill(pid as i32, libc::SIGTERM) }, 0);
+    // A managed watchdog reaps its child and removes supervisor.pid as part of
+    // shutdown; the standalone audit worker still needs an explicit signal.
+    if let Some(pid) = p.supervisor_pid() {
+        assert_eq!(unsafe { libc::kill(pid as i32, libc::SIGTERM) }, 0);
+    }
     let file = std::fs::OpenOptions::new()
         .write(true)
         .open(p.home.join("supervisor.lock"))
