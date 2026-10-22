@@ -1,0 +1,56 @@
+{
+  "date_utc": "2026-10-22",
+  "platform": "linux-amd64",
+  "case": "F-S3: a real parallel worker must obey tenant memory limits and report a recoverable statement error",
+  "reproduce": "PGX_DIST=<assembled distribution> python3 -I tests/pgx/test_parallel_limits.py -v",
+  "configuration": {
+    "session_limit_mb": 16,
+    "max_parallel_workers": 4,
+    "parallel_leader_participation": false,
+    "debug_parallel_query": "on",
+    "runtime_pool": "off"
+  },
+  "workload": "A table supplies n=48*1024*1024 to length(repeat('x', n)); a parallel-safe pg_sleep in the expression lets a second connection observe the worker before allocation. The single-copy Gather runs the expression in its worker.",
+  "before": {
+    "engine": "checksum-verified v0.1.0 linux-amd64 release",
+    "engine_binary_sha256": "8c2d0ce2967e34fefcb044f35e3d8b94401e674ad2f1e9e6e97b6d73b128b8be",
+    "explain_analyze_workers_launched": 1,
+    "observed_parallel_workers": [
+      [
+        "1016",
+        "1012",
+        "parallel worker"
+      ]
+    ],
+    "allocation_result": [
+      [
+        "50331648"
+      ]
+    ],
+    "sqlstate": null,
+    "same_session_after": "1",
+    "sibling_session_after": "1",
+    "regression_test": "FAIL: expected 53200, actual result 50331648"
+  },
+  "after": {
+    "engine": "source-built audit fixes; worker enforcement code from 539ab094",
+    "engine_binary_sha256": "525672137fc2e10a12699574d55840db6375ccfc48c354600289ae32397ca630",
+    "explain_analyze_workers_launched": 1,
+    "observed_parallel_workers": [
+      [
+        "1016",
+        "1012",
+        "parallel worker"
+      ]
+    ],
+    "sqlstate": "53200",
+    "error_context": "parallel worker",
+    "error_detail": "Failed on request of size 50331652 in memory context \"ExprContext\".",
+    "error_hint": "The session reached pgrust.session_memory_limit.",
+    "same_session_after": "1",
+    "sibling_session_after": "1",
+    "bystander_queries_during": 69,
+    "regression_test": "PASS"
+  },
+  "scope": "This proves worker refusal and recovery on Linux amd64. It does not measure RSS, exact simultaneous-allocation overshoot, or native ARM64 behavior."
+}
