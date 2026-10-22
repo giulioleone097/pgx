@@ -953,7 +953,7 @@ pub fn AbsorbSyncRequests() -> PgResult<()> {
         // it, and abort_cleanup's LWLockReleaseAll drops the comm lock.
         let n_reqs = n.max(0) as usize;
         let alloc = *buf.allocator();
-        buf.try_reserve(n_reqs)
+        mcx::with_fallible_allocations(|| buf.try_reserve(n_reqs))
             .map_err(|_| alloc.oom(n_reqs * core::mem::size_of::<CheckpointerRequest>()))?;
         // SAFETY: serialized by CheckpointerCommLock
         buf.extend((0..n).map(|i| unsafe { cp.requests[i as usize].get() }));
