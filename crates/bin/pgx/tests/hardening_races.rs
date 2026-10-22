@@ -202,3 +202,40 @@ fn competing_supervisor_exits_without_replacing_the_singleton() {
     );
     assert_eq!(p.supervisor_pid(), Some(original));
 }
+
+#[test]
+fn force_init_waits_for_run_and_start_locks_and_preserves_the_live_cluster() {
+    let p = Pgx::new();
+    p.init_ok();
+    p.start_ok();
+    query(&p, "CREATE TABLE keep(v int)");
+    query(&p, "INSERT INTO keep VALUES (42)");
+    let original_pid = std::fs::read_to_string(p.home.join("data/postmaster.pid")).unwrap();
+    for name in ["run.lock", "start.lock"] {
+        let held = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(p.home.join(name))
+            .unwrap();
+        assert_eq!(unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX) }, 0);
+        let initializer = ManagedChild::spawn(p.cmd(&["init", "--force"]));
+        wait_for(
+            || initializer.waiting_on("lock"),
+            "force init waits for the coordination lock",
+        );
+        drop(held);
+        let result = initializer.finish();
+        assert_eq!(
+            result.code,
+            4,
+            "a live engine must prevent force init after acquiring {name}: {}",
+            result.all()
+        );
+        assert_eq!(query(&p, "SELECT v FROM keep"), "42");
+        assert_eq!(
+            std::fs::read_to_string(p.home.join("data/postmaster.pid")).unwrap(),
+            original_pid
+        );
+    }
+}
