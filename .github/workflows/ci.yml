@@ -99,6 +99,7 @@ jobs:
           python3 -I tests/pgx/test_sql.py
           python3 -I tests/pgx/test_features.py
           python3 -I tests/pgx/test_parallel_limits.py
+          python3 -I tests/pgx/test_maintenance.py
           cargo test -p pgx --release --test lifecycle --test databases --test clone --test doctor --test run --test ttl --test hardening --test hardening_races
       - name: Installer end-to-end
         run: dist/test/install_test.sh
