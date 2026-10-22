@@ -146,7 +146,7 @@ pub fn command_line(pid: u32) -> Option<String> {
         }
     }
     let out = Command::new("ps")
-        .args(["-o", "command=", "-p", &pid.to_string()])
+        .args(["-ww", "-o", "command=", "-p", &pid.to_string()])
         .output()
         .ok()?;
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -155,6 +155,88 @@ pub fn command_line(pid: u32) -> Option<String> {
     } else {
         None
     }
+}
+
+#[cfg(target_os = "linux")]
+fn process_argv(pid: u32) -> Option<Vec<Vec<u8>>> {
+    let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let mut args: Vec<_> = raw.split(|b| *b == 0).map(<[u8]>::to_vec).collect();
+    if args.last().is_some_and(Vec::is_empty) {
+        args.pop();
+    }
+    Some(args)
+}
+
+/// KERN_PROCARGS2 returns argc, executable path, NUL padding, then argc
+/// NUL-terminated argv entries. Stop at argc: the remaining bytes are the
+/// process environment and are neither needed nor interpreted here.
+#[cfg(any(test, target_os = "macos"))]
+fn parse_macos_procargs(raw: &[u8]) -> Option<Vec<Vec<u8>>> {
+    let argc = i32::from_ne_bytes(raw.get(..4)?.try_into().ok()?);
+    if argc <= 0 || argc as usize > raw.len() {
+        return None;
+    }
+    let mut pos = 4 + raw.get(4..)?.iter().position(|b| *b == 0)? + 1;
+    while raw.get(pos) == Some(&0) {
+        pos += 1;
+    }
+    let mut args = Vec::with_capacity(argc as usize);
+    for _ in 0..argc {
+        let len = raw.get(pos..)?.iter().position(|b| *b == 0)?;
+        args.push(raw.get(pos..pos + len)?.to_vec());
+        pos += len + 1;
+    }
+    Some(args)
+}
+
+#[cfg(target_os = "macos")]
+fn process_argv(pid: u32) -> Option<Vec<Vec<u8>>> {
+    let mut mib = [
+        libc::CTL_KERN,
+        libc::KERN_PROCARGS2,
+        i32::try_from(pid).ok()?,
+    ];
+    let mut len = 0usize;
+    let result = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as u32,
+            std::ptr::null_mut(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if result != 0 || len == 0 || len > 1024 * 1024 {
+        return None;
+    }
+    let mut raw = vec![0u8; len];
+    let result = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as u32,
+            raw.as_mut_ptr().cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if result != 0 {
+        return None;
+    }
+    parse_macos_procargs(raw.get(..len)?)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn process_argv(_pid: u32) -> Option<Vec<Vec<u8>>> {
+    None
+}
+
+fn engine_argv_matches(args: &[Vec<u8>], data_dir: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    args.windows(2).any(|pair| {
+        pair[0] == b"-D" && same_path(Path::new(std::ffi::OsStr::from_bytes(&pair[1])), data_dir)
+    })
 }
 
 /// True when `cmd` is an engine process launched on exactly `data_dir`, i.e. it
@@ -210,21 +292,20 @@ pub fn supervisor_pid(home: &Home) -> Option<u32> {
     let exe = std::env::current_exe().ok()?;
     #[cfg(target_os = "linux")]
     {
-        use std::os::unix::ffi::OsStrExt;
         if !same_path(&std::fs::read_link(format!("/proc/{pid}/exe")).ok()?, &exe) {
             return None;
         }
-        let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
-        let args: Vec<_> = raw
-            .split(|b| *b == 0)
-            .filter(|arg| !arg.is_empty())
-            .collect();
-        if args.len() != 3 || args[1] != b"supervise" || args[2] != root.as_os_str().as_bytes() {
+    }
+    if let Some(args) = process_argv(pid) {
+        use std::os::unix::ffi::OsStrExt;
+        if args.len() != 3
+            || args[1] != b"supervise"
+            || args[2] != root.as_os_str().as_bytes()
+            || !same_path(Path::new(std::ffi::OsStr::from_bytes(&args[0])), &exe)
+        {
             return None;
         }
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
+    } else {
         let cmd = command_line(pid)?;
         if cmd != format!("{} supervise {}", exe.display(), root.display()) {
             return None;
@@ -238,13 +319,8 @@ pub fn is_our_engine(pid: u32, data_dir: &Path) -> bool {
     if !pid_alive(pid) {
         return false;
     }
-    #[cfg(target_os = "linux")]
-    if let Ok(raw) = std::fs::read(format!("/proc/{pid}/cmdline")) {
-        use std::os::unix::ffi::OsStrExt;
-        let args: Vec<_> = raw.split(|b| *b == 0).collect();
-        return args.windows(2).any(|pair| {
-            pair[0] == b"-D" && same_path(Path::new(std::ffi::OsStr::from_bytes(pair[1])), data_dir)
-        });
+    if let Some(args) = process_argv(pid) {
+        return engine_argv_matches(&args, data_dir);
     }
     match command_line(pid) {
         Some(cmd) => engine_cmdline_matches(&cmd, data_dir),
@@ -573,6 +649,35 @@ mod tests {
             "/opt/pgx/bin/postgres -D /home/u/.pgx-other/data",
             data
         ));
+        assert!(engine_cmdline_matches(
+            "/opt/My PGX/bin/postgres -D /home/My PGX/data -p 5432",
+            Path::new("/home/My PGX/data")
+        ));
+    }
+
+    #[test]
+    fn macos_raw_argv_preserves_spaces_and_stops_before_environment() {
+        let mut raw = 3i32.to_ne_bytes().to_vec();
+        raw.extend_from_slice(b"/opt/My PGX/bin/postgres\0\0\0");
+        raw.extend_from_slice(b"/opt/My PGX/bin/postgres\0-D\0/tmp/My PGX/data\0IGNORED=value\0");
+        let args = parse_macos_procargs(&raw).unwrap();
+        assert_eq!(args.len(), 3);
+        assert_eq!(args[2], b"/tmp/My PGX/data");
+        assert!(engine_argv_matches(&args, Path::new("/tmp/My PGX/data")));
+        assert!(!engine_argv_matches(&args, Path::new("/tmp/My")));
+        for invalid in [
+            vec![],
+            vec![1, 0],
+            (-1i32).to_ne_bytes().to_vec(),
+            500i32.to_ne_bytes().to_vec(),
+        ] {
+            assert!(parse_macos_procargs(&invalid).is_none());
+        }
+        raw.truncate(raw.len() - b"/tmp/My PGX/data\0IGNORED=value\0".len());
+        assert!(
+            parse_macos_procargs(&raw).is_none(),
+            "truncated argv must fail safely"
+        );
     }
 
     #[cfg(target_os = "linux")]
