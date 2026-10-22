@@ -98,6 +98,16 @@ jobs:
           python3 -I tests/pgx/test_sql.py
           python3 -I tests/pgx/test_features.py
           cargo test -p pgx --release --test lifecycle --test init_environment --test databases --test clone --test doctor --test run --test ttl --test hardening
+      - name: Repeated native ARM64 startup gate
+        if: matrix.os == 'ubuntu-24.04-arm'
+        run: sh tests/pgx/repeat_run.sh
+      - name: Preserve failed black-box engine logs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: black-box-logs-${{ matrix.os }}
+          path: /tmp/pgxt/*/h/log/
+          if-no-files-found: ignore
       - name: Installer end-to-end
         run: dist/test/install_test.sh
       - name: Installer discovery/version/checksum/download tests

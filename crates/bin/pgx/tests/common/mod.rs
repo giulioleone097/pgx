@@ -1,12 +1,14 @@
 //! Black-box harness: a temporary installation prefix (the engine and share
 //! trees of an assembled distribution, plus the `pgx` binary under test) and a
 //! temporary `PGX_HOME`. Every test gets its own; the engine is stopped and
-//! the directories removed on drop, even when the test panics.
+//! the directories removed on drop. Failed tests keep their logs for diagnosis.
 //!
 //! Needs `PGX_DIST=<assembled prefix>` (see dist/assemble.sh). Without it the
 //! harness fails loudly: these suites are release gates, never silent skips.
 #![allow(dead_code)]
 use std::net::TcpListener;
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -18,6 +20,8 @@ pub struct Pgx {
     pub prefix: PathBuf,
     pub home: PathBuf,
     pub port: u16,
+    // Keep the cross-process reservation until engine cleanup has finished.
+    _port_lease: std::fs::File,
 }
 
 pub fn dist_prefix() -> PathBuf {
@@ -36,24 +40,76 @@ pub fn dist_prefix() -> PathBuf {
     p
 }
 
-pub fn free_port() -> u16 {
-    // Hand out a DISTINCT candidate per call (process-wide sequence) rather than
-    // asking the kernel for an ephemeral port with bind(:0): under parallel
-    // tests two bind(:0) calls can be handed the same recently-closed ephemeral
-    // port, and then two `pgx init`s race to bind it (one gets exit 4). A unique
-    // sequence, offset by pid so separate test binaries don't overlap, removes
-    // that race; each candidate is still bind-verified to skip a port already
-    // held by an unrelated process.
-    let offset = (std::process::id().wrapping_mul(131)) % 20000;
-    for _ in 0..40000u32 {
-        let seq = PORT_SEQ.fetch_add(1, Ordering::SeqCst);
-        let port = 20000 + ((offset + seq) % 40000);
-        let port = port as u16;
-        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
-            return port;
+fn port_is_free(port: u16) -> bool {
+    let Ok(_v4) = TcpListener::bind(("127.0.0.1", port)) else {
+        return false;
+    };
+    match TcpListener::bind(("::1", port)) {
+        Ok(_) => true,
+        Err(e) => {
+            e.kind() == std::io::ErrorKind::AddrNotAvailable
+                || e.raw_os_error() == Some(libc::EAFNOSUPPORT)
         }
     }
-    panic!("no free port found in [20000, 60000)");
+}
+
+fn ephemeral_ports() -> (u16, u16) {
+    #[cfg(target_os = "linux")]
+    let range = std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range").ok();
+    #[cfg(not(target_os = "linux"))]
+    let range = Command::new("sysctl")
+        .args([
+            "-n",
+            "net.inet.ip.portrange.first",
+            "net.inet.ip.portrange.last",
+        ])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
+    range
+        .and_then(|s| {
+            let mut words = s.split_whitespace();
+            Some((words.next()?.parse().ok()?, words.next()?.parse().ok()?))
+        })
+        .unwrap_or((32768, 65535))
+}
+
+fn reserve_port() -> (u16, std::fs::File) {
+    // A PID offset alone is not a reservation: two test binaries can choose the
+    // same candidate before either starts its engine. Keep a flock for the
+    // entire harness lifetime, including init's socket-only bootstrap and stops.
+    // Do not unlink lease files: replacing their inode would defeat flock.
+    let leases = scratch_root().join("ports");
+    std::fs::create_dir_all(&leases).unwrap();
+    let (first_ephemeral, last_ephemeral) = ephemeral_ports();
+    let offset = (std::process::id().wrapping_mul(131)) % 20000;
+    for _ in 0..20000u32 {
+        let seq = PORT_SEQ.fetch_add(1, Ordering::SeqCst);
+        let port = (10000 + ((offset + seq) % 20000)) as u16;
+        // Sibling TCP clients must not take a future engine's listening port.
+        if (first_ephemeral..=last_ephemeral).contains(&port) {
+            continue;
+        }
+        let lease = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .open(leases.join(format!("{port}.lock")))
+            .expect("open test port lease");
+        if unsafe { libc::flock(lease.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let e = std::io::Error::last_os_error();
+            assert_eq!(e.kind(), std::io::ErrorKind::WouldBlock, "port lease: {e}");
+            continue;
+        }
+        // Match init's IPv4 AND IPv6 check, not just its first listener.
+        if port_is_free(port) {
+            return (port, lease);
+        }
+    }
+    panic!("no unleased, non-ephemeral test port found in [10000, 30000)");
 }
 
 pub fn scratch_root() -> PathBuf {
@@ -82,10 +138,12 @@ impl Pgx {
         std::fs::copy(env!("CARGO_BIN_EXE_pgx"), prefix.join("bin/pgx")).unwrap();
         std::os::unix::fs::symlink(dist.join("bin/postgres"), prefix.join("bin/postgres")).unwrap();
         std::os::unix::fs::symlink(dist.join("share"), prefix.join("share")).unwrap();
+        let (port, lease) = reserve_port();
         Pgx {
             prefix,
             home,
-            port: free_port(),
+            port,
+            _port_lease: lease,
         }
     }
 
@@ -133,7 +191,7 @@ impl Pgx {
     pub fn wait_port_free(&self, secs: u64) -> bool {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
         while std::time::Instant::now() < deadline {
-            if TcpListener::bind(("127.0.0.1", self.port)).is_ok() {
+            if port_is_free(self.port) {
                 return true;
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -237,6 +295,11 @@ impl Pgx {
     pub fn stop_ok(&self) {
         let r = self.run(&["stop"]);
         assert_eq!(r.code, 0, "pgx stop failed: {}", r.all());
+        assert!(
+            self.wait_port_free(10),
+            "stop did not release port {}",
+            self.port
+        );
     }
 
     pub fn log_tail(&self) -> String {
@@ -357,6 +420,15 @@ pub fn find_psql() -> PathBuf {
 
 impl Drop for Pgx {
     fn drop(&mut self) {
+        let failed = std::thread::panicking();
+        if failed {
+            eprintln!(
+                "preserving failed test home {} (port {})\n{}",
+                self.home.display(),
+                self.port,
+                self.log_tail()
+            );
+        }
         // Stop the TTL supervisor first so it does not linger after the home is gone.
         if let Some(pid) = self.supervisor_pid() {
             unsafe { libc::kill(pid as i32, libc::SIGKILL) };
@@ -365,7 +437,7 @@ impl Drop for Pgx {
         for pid in self.engine_pids() {
             unsafe { libc::kill(pid as i32, libc::SIGKILL) };
         }
-        if std::env::var("PGX_TEST_KEEP").is_err() {
+        if !failed && std::env::var("PGX_TEST_KEEP").is_err() {
             if let Some(base) = self.prefix.parent() {
                 let _ = std::fs::remove_dir_all(base);
             }
