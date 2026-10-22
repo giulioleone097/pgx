@@ -1088,11 +1088,12 @@ mod tests {
         insert(k, 1, Arc::clone(&v), 100, |_| true);
         insert(k, 2, Arc::new(2u32), 100, |_| true);
         insert(other, 1, Arc::clone(&v), 100, |_| true);
-        assert_eq!(purge_key(k), (2, 200));
+        // v remains held by `other`: only generation 2's content is released.
+        assert_eq!(purge_key(k), (2, 100));
         assert!(lookup(k, 2, |_| true).is_none());
         assert!(lookup(other, 1, |_| true).is_some());
         assert_eq!(purge_key(k), (0, 0));
-        purge_key(other);
+        assert_eq!(purge_key(other), (1, 100));
     }
 
     #[test]
