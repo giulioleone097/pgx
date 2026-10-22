@@ -5,7 +5,10 @@ stopped and deleted on exit, even on failure.
     PGX_DIST=<prefix> is required (dist/assemble.sh --out ...).
 """
 import json
+import errno
+import fcntl
 import os
+import secrets
 import shutil
 import signal
 import socket
@@ -40,12 +43,39 @@ def _is_zombie(pid):
         return False
 
 
-def free_port():
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
+def reserve_port():
+    """Lease a non-ephemeral port across Rust and Python test processes."""
+    leases = os.path.join(scratch_root(), "ports")
+    os.makedirs(leases, exist_ok=True)
+    try:
+        with open("/proc/sys/net/ipv4/ip_local_port_range") as f:
+            first, last = map(int, f.read().split())
+    except FileNotFoundError:
+        values = subprocess.check_output(
+            ["sysctl", "-n", "net.inet.ip.portrange.first", "net.inet.ip.portrange.last"], text=True
+        ).split()
+        first, last = map(int, values)
+    offset = secrets.randbelow(20000)
+    for index in range(20000):
+        port = 10000 + (offset + index) % 20000
+        if first <= port <= last:
+            continue
+        # Never unlink leases: replacing the inode would defeat flock.
+        lease = open(os.path.join(leases, "%d.lock" % port), "a")
+        try:
+            fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with socket.socket() as ipv4:
+                ipv4.bind(("127.0.0.1", port))
+                try:
+                    with socket.socket(socket.AF_INET6) as ipv6:
+                        ipv6.bind(("::1", port))
+                except OSError as e:
+                    if e.errno not in (errno.EAFNOSUPPORT, errno.EPROTONOSUPPORT, errno.EADDRNOTAVAIL):
+                        raise
+            return port, lease
+        except (BlockingIOError, OSError):
+            lease.close()
+    raise RuntimeError("no unleased non-ephemeral test port available")
 
 
 def scratch_root():
@@ -70,9 +100,9 @@ class CliResult:
 class Pgx:
     def __init__(self, name="t", durability=None, keep=False, settings=None):
         self.prefix = dist_prefix()
-        self.home = os.path.join(scratch_root(), "%s-%d-%s" % (name, os.getpid(), free_port()))
+        self.home = os.path.join(scratch_root(), "%s-%d-%s" % (name, os.getpid(), secrets.token_hex(3)))
         os.makedirs(self.home)
-        self.port = free_port()
+        self.port, self._port_lease = reserve_port()
         self.durability = durability
         self.keep = keep or bool(os.environ.get("PGX_TEST_KEEP"))
         self.settings = settings or {}
@@ -101,7 +131,8 @@ class Pgx:
     def diagnostics(self):
         """Who holds the port, what the pid file says, which engines exist: for post-mortems."""
         out = ["time %s" % time.strftime("%H:%M:%S")]
-        out.append("lsof -i:%d:\n%s" % (self.port, subprocess.run(["lsof", "-nP", "-i:%d" % self.port], capture_output=True, text=True).stdout))
+        if shutil.which("lsof"):
+            out.append("lsof -i:%d:\n%s" % (self.port, subprocess.run(["lsof", "-nP", "-i:%d" % self.port], capture_output=True, text=True).stdout))
         out.append("netstat entries for port:\n%s" % subprocess.run("netstat -anv 2>/dev/null | grep '[.:]%d ' || true" % self.port, shell=True, capture_output=True, text=True).stdout.strip())
         try:
             with open(os.path.join(self.data, "postmaster.pid")) as f:
@@ -199,6 +230,7 @@ class Pgx:
                 pass
         if not self.keep:
             shutil.rmtree(self.home, ignore_errors=True)
+        self._port_lease.close()
 
     def __enter__(self):
         return self
