@@ -32,6 +32,15 @@ pub fn lock_file(path: &Path, blocking: bool) -> Result<Option<std::fs::File>> {
 /// owned by root or us), where another user could replace our directory.
 pub fn private_dir(path: &Path) -> Result<()> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+    let absolute;
+    let path = if path.is_absolute() {
+        path
+    } else {
+        absolute = std::env::current_dir()
+            .map_err(|e| PgxError::failure(format!("cannot resolve current directory: {e}")))?
+            .join(path);
+        absolute.as_path()
+    };
     let uid = unsafe { libc::geteuid() };
     for parent in path.ancestors().skip(1) {
         if parent.as_os_str().is_empty() {
