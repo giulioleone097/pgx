@@ -2,6 +2,51 @@
 use crate::errors::{PgxError, Result};
 use std::path::Path;
 
+/// Create a private directory, or secure an existing directory owned by us.
+/// Opening without following the final symlink prevents chmod/socket use of an
+/// attacker-supplied path. Reject writable ancestors (except sticky directories
+/// owned by root or us), where another user could replace our directory.
+pub fn private_dir(path: &Path) -> Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+    let uid = unsafe { libc::geteuid() };
+    for parent in path.ancestors().skip(1) {
+        if parent.as_os_str().is_empty() {
+            continue;
+        }
+        if let Ok(meta) = std::fs::metadata(parent) {
+            if meta.mode() & 0o022 != 0
+                && !((meta.uid() == 0 || meta.uid() == uid) && meta.mode() & libc::S_ISVTX != 0)
+            {
+                return Err(PgxError::failure(format!(
+                    "unsafe writable parent directory {}",
+                    parent.display()
+                )));
+            }
+        }
+    }
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)
+        .map_err(|e| PgxError::io("cannot create private directory", path, &e))?;
+    let dir = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|e| PgxError::io("cannot open private directory", path, &e))?;
+    let meta = dir
+        .metadata()
+        .map_err(|e| PgxError::io("cannot stat", path, &e))?;
+    if meta.uid() != uid {
+        return Err(PgxError::failure(format!(
+            "directory {} is owned by another user",
+            path.display()
+        )));
+    }
+    dir.set_permissions(std::fs::Permissions::from_mode(0o700))
+        .map_err(|e| PgxError::io("cannot secure directory", path, &e))
+}
+
 /// Copies `src` into `dst` (created), directories 0700, files 0600.
 pub fn copy_tree_private(src: &Path, dst: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -101,6 +146,32 @@ mod tests {
         assert_eq!(p.len(), 32);
         assert!(p.chars().all(|c| c.is_ascii_alphanumeric()));
         assert_ne!(p, random_password().unwrap());
+    }
+
+    #[test]
+    fn private_directory_rejects_symlinks_and_repairs_modes() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!("pgx-private-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("real")).unwrap();
+        std::os::unix::fs::symlink(base.join("real"), base.join("link")).unwrap();
+        assert!(private_dir(&base.join("link")).is_err());
+        private_dir(&base.join("real")).unwrap();
+        assert_eq!(
+            std::fs::metadata(base.join("real"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        std::fs::set_permissions(base.join("real"), std::fs::Permissions::from_mode(0o777))
+            .unwrap();
+        assert!(
+            private_dir(&base.join("real/child")).is_err(),
+            "our own shared writable parent also allows replacement by another user"
+        );
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]

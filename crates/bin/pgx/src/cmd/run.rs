@@ -18,9 +18,8 @@ pub const DEFAULT_DB: &str = "app";
 /// covers starting; init (shared `data.tmp`) and the create/ensure race are not
 /// under it, so without this two concurrent first-`pgx run`s on a fresh home
 /// could clash initialising. Held for the whole command; released on return.
-fn acquire_run_lock(home: &Home) -> Result<std::fs::File> {
-    std::fs::create_dir_all(&home.root)
-        .map_err(|e| PgxError::io("cannot create", &home.root, &e))?;
+pub(super) fn acquire_run_lock(home: &Home) -> Result<std::fs::File> {
+    crate::fsutil::private_dir(&home.root)?;
     let path = home.root.join("run.lock");
     let f = std::fs::OpenOptions::new()
         .create(true)

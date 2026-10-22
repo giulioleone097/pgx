@@ -38,7 +38,8 @@ pub fn run(out: &Out) -> Result<ExitCode> {
         return Ok(ExitCode::Ok);
     }
     let pid_path = home.root.join("supervisor.pid");
-    let _ = std::fs::write(&pid_path, std::process::id().to_string());
+    std::fs::write(&pid_path, std::process::id().to_string())
+        .map_err(|e| PgxError::io("cannot write supervisor pid", &pid_path, &e))?;
 
     let interval = std::env::var("PGX_TTL_INTERVAL")
         .ok()
@@ -52,6 +53,9 @@ pub fn run(out: &Out) -> Result<ExitCode> {
 
     let mut down_cycles = 0u32;
     loop {
+        if let Err(e) = crate::process::rotate_log(&home) {
+            out.note(&format!("pgx supervise: {e}"));
+        }
         // Home removed or re-initialised out from under us (e.g. a test tore it
         // down, or `pgx init --force`): stop immediately.
         if !home.is_initialized() {
@@ -97,9 +101,29 @@ fn run_cycle(ctx: &Ctx) {
         Err(_) => return, // runtime busy/starting; try again next cycle
     };
     for rec in due {
+        let Ok(_lock) = store.lock(&rec.name) else {
+            continue;
+        };
+        // The queued record may have been dropped/recreated or extended while
+        // waiting for the lock. Never finalize metadata from that old snapshot.
+        let Ok(Some(rec)) = store.load(&rec.name) else {
+            continue;
+        };
+        let now = crate::fsutil::now_epoch();
+        if !rec.is_expired(now) || !should_attempt(&rec, now) {
+            continue;
+        }
         if let Err(e) = expire_one(ctx, &store, &mut client, &rec) {
             // Observable failure; back off and retry on a later cycle.
-            let mut r = rec.clone();
+            let Ok(Some(mut r)) = store.load(&rec.name) else {
+                continue;
+            };
+            if r.oid != rec.oid
+                || r.cluster_id != rec.cluster_id
+                || !r.is_expired(crate::fsutil::now_epoch())
+            {
+                continue;
+            }
             r.state = State::RetryPending;
             r.last_attempt = Some(crate::fsutil::now_epoch());
             r.last_error = Some(e.message.clone());
@@ -134,7 +158,7 @@ fn expire_one(
     }
     // Gate 2: only act on the cluster this metadata was written for.
     if rec.cluster_id != ctx.cluster_id() {
-        return Ok(());
+        return store.remove(&rec.name);
     }
     // Gate 3: the database must still exist with the recorded OID. Gone → finalize.
     // Different OID → the name was reused by a new database; drop the stale record,
@@ -144,7 +168,9 @@ fn expire_one(
         Some(oid) if oid != rec.oid => return store.remove(&rec.name),
         Some(_) => {}
     }
-    // Gate 4: re-read the live record and the clock immediately before dropping.
+    // Gate 4: re-read under the per-database lock held by run_cycle. CLI TTL
+    // updates hold the same lock, through SQL and metadata, so cancellation
+    // cannot be acknowledged between this check and DROP.
     // A concurrent `pgx ttl … unlimited` (record removed) or extension (deadline
     // moved) cancels the deletion.
     let now = crate::fsutil::now_epoch();

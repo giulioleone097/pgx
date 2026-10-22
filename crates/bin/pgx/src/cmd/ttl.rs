@@ -13,6 +13,7 @@ pub fn run(out: &Out, name: &str, value: Option<&str>) -> Result<ExitCode> {
     let name = names::validate_user_target(name)?;
     let ctx = Ctx::load()?;
     let store = MetaStore::new(&ctx.home.root);
+    let _lock = store.lock(name.as_str())?;
     let now = crate::fsutil::now_epoch();
 
     let mut client = ctx.connect("postgres")?;
@@ -29,7 +30,9 @@ pub fn run(out: &Out, name: &str, value: Option<&str>) -> Result<ExitCode> {
         // Show the current TTL.
         None => {
             client.close();
-            let rec = store.load(name.as_str())?;
+            let rec = store
+                .load(name.as_str())?
+                .filter(|r| r.oid == oid && r.cluster_id == ctx.cluster_id());
             let (label, expires_at) = match &rec {
                 Some(r) => (r.ttl_label.clone(), r.expires_at),
                 None => ("unlimited".to_string(), None),

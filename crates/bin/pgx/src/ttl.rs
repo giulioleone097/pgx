@@ -68,7 +68,8 @@ pub fn parse_ttl(s: &str) -> Result<Ttl> {
     ) {
         return Ok(Ttl::Unlimited);
     }
-    let (num, unit) = t.split_at(t.len() - 1);
+    let (unit_start, _) = t.char_indices().next_back().expect("nonempty TTL");
+    let (num, unit) = t.split_at(unit_start);
     let per = match unit {
         "s" => 1u64,
         "m" => 60,
@@ -199,6 +200,9 @@ mod tests {
             "5",
             "m",
             "5x",
+            "5é",
+            "é",
+            "5🙂",
             "1.5h",
             "1y",
             "5 m",

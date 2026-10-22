@@ -147,13 +147,26 @@ fn read_message<S: Read>(s: &mut S) -> Result<(u8, Vec<u8>), WireError> {
 
 fn cstring_at(buf: &[u8], pos: &mut usize) -> Result<String, WireError> {
     let start = *pos;
-    let end = buf[start..]
+    let end = buf
+        .get(start..)
+        .ok_or_else(|| WireError::Protocol("short string".into()))?
         .iter()
         .position(|b| *b == 0)
         .ok_or_else(|| WireError::Protocol("unterminated string".into()))?
         + start;
     *pos = end + 1;
     Ok(String::from_utf8_lossy(&buf[start..end]).into_owned())
+}
+
+fn take<'a>(buf: &'a [u8], pos: &mut usize, len: usize) -> Result<&'a [u8], WireError> {
+    let end = pos
+        .checked_add(len)
+        .ok_or_else(|| WireError::Protocol("field length overflow".into()))?;
+    let value = buf
+        .get(*pos..end)
+        .ok_or_else(|| WireError::Protocol("truncated field".into()))?;
+    *pos = end;
+    Ok(value)
 }
 
 impl Client<UnixStream> {
@@ -188,7 +201,9 @@ impl<S: Read + Write> Client<S> {
             match tag {
                 b'R' => {
                     let kind = u32::from_be_bytes(
-                        payload[..4]
+                        payload
+                            .get(..4)
+                            .ok_or_else(|| WireError::Protocol("short auth message".into()))?
                             .try_into()
                             .map_err(|_| WireError::Protocol("short auth message".into()))?,
                     );
@@ -231,35 +246,40 @@ impl<S: Read + Write> Client<S> {
             let (tag, payload) = read_message(&mut self.stream)?;
             match tag {
                 b'T' => {
-                    let n = u16::from_be_bytes([payload[0], payload[1]]) as usize;
-                    let mut pos = 2;
+                    let mut pos = 0;
+                    let n = u16::from_be_bytes(take(&payload, &mut pos, 2)?.try_into().unwrap())
+                        as usize;
                     let mut cols = Vec::with_capacity(n);
                     for _ in 0..n {
                         cols.push(cstring_at(&payload, &mut pos)?);
-                        pos += 18;
+                        take(&payload, &mut pos, 18)?;
                     }
                     result.columns = cols;
                     result.rows.clear();
                 }
                 b'D' => {
-                    let n = u16::from_be_bytes([payload[0], payload[1]]) as usize;
-                    let mut pos = 2;
+                    let mut pos = 0;
+                    let n = u16::from_be_bytes(take(&payload, &mut pos, 2)?.try_into().unwrap())
+                        as usize;
                     let mut row = Vec::with_capacity(n);
                     for _ in 0..n {
                         let len = i32::from_be_bytes(
-                            payload[pos..pos + 4]
+                            take(&payload, &mut pos, 4)?
                                 .try_into()
                                 .map_err(|_| WireError::Protocol("short data row".into()))?,
                         );
-                        pos += 4;
-                        if len < 0 {
+                        if len == -1 {
                             row.push(None);
+                        } else if len < -1 {
+                            return Err(WireError::Protocol(
+                                "invalid negative field length".into(),
+                            ));
                         } else {
                             let len = len as usize;
                             row.push(Some(
-                                String::from_utf8_lossy(&payload[pos..pos + len]).into_owned(),
+                                String::from_utf8_lossy(take(&payload, &mut pos, len)?)
+                                    .into_owned(),
                             ));
-                            pos += len;
                         }
                     }
                     result.rows.push(row);
@@ -367,6 +387,45 @@ mod tests {
     #[test]
     fn query_message_bytes() {
         assert_eq!(encode_query("SELECT 1"), msg(b'Q', b"SELECT 1\0"));
+    }
+
+    #[test]
+    fn malformed_backend_fields_return_errors_without_panics() {
+        for payload in [vec![], vec![0], vec![0, 0, 0]] {
+            let fake = Fake {
+                input: Cursor::new(msg(b'R', &payload)),
+                output: Vec::new(),
+            };
+            assert!(matches!(
+                Client::handshake(fake, "postgres", "db"),
+                Err(WireError::Protocol(_))
+            ));
+        }
+        let cases = [
+            (b'T', vec![]),
+            (b'T', vec![0, 1, b'c', 0]),
+            (b'T', vec![0, 2, 0]),
+            (b'D', vec![]),
+            (b'D', vec![0, 1]),
+            (b'D', vec![0, 1, 0, 0, 0, 20, b'x']),
+            (b'D', vec![0, 1, 255, 255, 255, 254]),
+        ];
+        for (tag, payload) in cases {
+            let mut server = msg(b'R', &0u32.to_be_bytes());
+            server.extend(msg(b'Z', b"I"));
+            server.extend(msg(tag, &payload));
+            let fake = Fake {
+                input: Cursor::new(server),
+                output: Vec::new(),
+            };
+            let mut client = Client::handshake(fake, "postgres", "db").unwrap();
+            assert!(
+                matches!(client.simple_query("SELECT 1"), Err(WireError::Protocol(_))),
+                "tag {tag} payload {payload:?}"
+            );
+        }
+        let mut pos = 99;
+        assert!(cstring_at(b"x\0", &mut pos).is_err());
     }
 
     #[test]

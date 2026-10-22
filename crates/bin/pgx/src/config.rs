@@ -122,7 +122,8 @@ impl Config {
                 .map_err(|e| PgxError::io("cannot write", &tmp, &e))?;
             f.write_all(self.to_json().as_bytes())
                 .map_err(|e| PgxError::io("cannot write", &tmp, &e))?;
-            f.sync_all().ok();
+            f.sync_all()
+                .map_err(|e| PgxError::io("cannot sync", &tmp, &e))?;
         }
         #[cfg(unix)]
         {
@@ -130,7 +131,14 @@ impl Config {
             std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
                 .map_err(|e| PgxError::io("cannot chmod", &tmp, &e))?;
         }
-        std::fs::rename(&tmp, path).map_err(|e| PgxError::io("cannot rename into place", path, &e))
+        std::fs::rename(&tmp, path)
+            .map_err(|e| PgxError::io("cannot rename into place", path, &e))?;
+        if let Some(parent) = path.parent() {
+            std::fs::File::open(parent)
+                .and_then(|f| f.sync_all())
+                .map_err(|e| PgxError::io("cannot sync config directory", parent, &e))?;
+        }
+        Ok(())
     }
 
     pub fn load(path: &Path) -> Result<Config> {

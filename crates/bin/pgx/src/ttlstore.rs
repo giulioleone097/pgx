@@ -134,6 +134,10 @@ pub struct MetaStore {
     dir: PathBuf,
 }
 
+/// Hold across the identity check, metadata update and SQL mutation. Lock files
+/// are never unlinked: replacing a lock inode would split mutual exclusion.
+pub struct RecordLock(#[allow(dead_code)] std::fs::File);
+
 /// Hex-encode the database name for the filename so it is safe on every
 /// filesystem (including case-insensitive APFS, where `App` and `app` are
 /// distinct database names but would otherwise collide).
@@ -156,6 +160,30 @@ impl MetaStore {
         &self.dir
     }
 
+    pub fn lock(&self, name: &str) -> Result<RecordLock> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::OpenOptionsExt;
+        let locks = self.dir.with_file_name("ttl-locks");
+        crate::fsutil::private_dir(&locks)?;
+        let path = locks.join(format!("{}.lock", file_stem(name)));
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)
+            .map_err(|e| PgxError::io("cannot open TTL lock", &path, &e))?;
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(PgxError::io(
+                "cannot lock",
+                &path,
+                &std::io::Error::last_os_error(),
+            ));
+        }
+        Ok(RecordLock(file))
+    }
+
     fn path_for(&self, name: &str) -> PathBuf {
         self.dir.join(format!("{}.json", file_stem(name)))
     }
@@ -163,8 +191,7 @@ impl MetaStore {
     /// Write (or replace) a record atomically with 0600 permissions.
     pub fn save(&self, rec: &TtlRecord) -> Result<()> {
         use std::io::Write;
-        std::fs::create_dir_all(&self.dir)
-            .map_err(|e| PgxError::io("cannot create", &self.dir, &e))?;
+        crate::fsutil::private_dir(&self.dir)?;
         let path = self.path_for(&rec.name);
         let tmp = self.dir.join(format!(".{}.tmp", file_stem(&rec.name)));
         {
@@ -180,10 +207,14 @@ impl MetaStore {
                 .map_err(|e| PgxError::io("cannot write", &tmp, &e))?;
             f.write_all(rec.to_json().as_bytes())
                 .map_err(|e| PgxError::io("cannot write", &tmp, &e))?;
-            f.sync_all().ok();
+            f.sync_all()
+                .map_err(|e| PgxError::io("cannot sync", &tmp, &e))?;
         }
         std::fs::rename(&tmp, &path)
-            .map_err(|e| PgxError::io("cannot rename into place", &path, &e))
+            .map_err(|e| PgxError::io("cannot rename into place", &path, &e))?;
+        std::fs::File::open(&self.dir)
+            .and_then(|f| f.sync_all())
+            .map_err(|e| PgxError::io("cannot sync TTL directory", &self.dir, &e))
     }
 
     /// Load one record, or None if it does not exist. A corrupt record is an
@@ -351,5 +382,36 @@ mod tests {
         assert!(rec("x", Some(100)).is_expired(101));
         assert!(!rec("x", Some(100)).is_expired(99));
         assert!(!rec("x", None).is_expired(u64::MAX)); // unlimited never expires
+    }
+
+    #[test]
+    fn ttl_update_and_expiry_are_serialized_for_the_same_database() {
+        use std::sync::mpsc;
+        let (store, base) = tmpstore();
+        let held = store.lock("db").unwrap();
+        store.save(&rec("db", Some(100))).unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let other_home = base.clone();
+        let worker = std::thread::spawn(move || {
+            let store = MetaStore::new(&other_home);
+            started_tx.send(()).unwrap();
+            let _lock = store.lock("db").unwrap();
+            // Equivalent to the supervisor's final gate, after a concurrent
+            // unlimited update removes the record under its own lock.
+            done_tx.send(store.load("db").unwrap()).unwrap();
+        });
+        started_rx.recv().unwrap();
+        assert!(done_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_err());
+        store.remove("db").unwrap();
+        drop(held);
+        assert!(done_rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .unwrap()
+            .is_none());
+        worker.join().unwrap();
+        std::fs::remove_dir_all(base).unwrap();
     }
 }

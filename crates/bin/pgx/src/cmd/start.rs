@@ -14,7 +14,12 @@ pub struct StartLock(#[allow(dead_code)] std::fs::File);
 
 impl StartLock {
     pub fn acquire(ctx: &Ctx) -> Result<StartLock> {
-        let path = ctx.home.root.join("start.lock");
+        Self::acquire_home(&ctx.home)
+    }
+
+    pub fn acquire_home(home: &crate::layout::Home) -> Result<StartLock> {
+        crate::fsutil::private_dir(&home.root)?;
+        let path = home.root.join("start.lock");
         let f = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
@@ -77,6 +82,7 @@ fn start_locked(out: &Out, ctx: &Ctx) -> Result<StartOutcome> {
     }
     let pid_file = ctx.home.data.join("postmaster.pid");
     if pid_file.exists() {
+        process::require_stale_pidfile(&ctx.home.data)?;
         out.note("removing a stale postmaster.pid");
         std::fs::remove_file(&pid_file)
             .map_err(|e| PgxError::io("cannot remove", &pid_file, &e))?;
@@ -121,6 +127,11 @@ fn start_locked(out: &Out, ctx: &Ctx) -> Result<StartOutcome> {
     ) {
         Ok(client) => client.close(),
         Err(e) => {
+            if e.code == ExitCode::NotReady {
+                return Err(e.hint(
+                    "the engine remains running; check socket authentication and pg_hba.conf",
+                ));
+            }
             let _ = process::stop(
                 pid,
                 process::StopMode::Force,
@@ -186,6 +197,7 @@ pub fn spawn_supervisor(home: &crate::layout::Home) {
     };
     let mut cmd = Command::new(exe);
     cmd.arg("supervise")
+        .arg(std::fs::canonicalize(&home.root).unwrap_or_else(|_| home.root.clone()))
         .env("PGX_HOME", &home.root)
         .stdin(Stdio::null());
     if let Some(parent) = home.log_file.parent() {
@@ -231,11 +243,11 @@ pub fn stop_supervisor(home: &crate::layout::Home) {
         return;
     };
     if let Ok(pid) = text.trim().parse::<i32>() {
-        if pid > 1 && unsafe { libc::kill(pid, 0) } == 0 {
+        if pid > 1 && process::supervisor_pid(home) == Some(pid as u32) {
             unsafe { libc::kill(pid, libc::SIGTERM) };
             // Wait up to ~3s for it to exit so the lock is released before we return.
             for _ in 0..30 {
-                if unsafe { libc::kill(pid, 0) } != 0 {
+                if !process::pid_alive(pid as u32) {
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
@@ -266,6 +278,7 @@ pub fn serve(out: &Out) -> Result<ExitCode> {
     let sock_dir = ctx.sock_dir();
     let pid_file = ctx.home.data.join("postmaster.pid");
     if pid_file.exists() {
+        process::require_stale_pidfile(&ctx.home.data)?;
         let _ = std::fs::remove_file(&pid_file);
     }
     crate::process::clear_stale_socket_lock(&sock_dir, ctx.config.port);

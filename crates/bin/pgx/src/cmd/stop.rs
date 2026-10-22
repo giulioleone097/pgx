@@ -15,6 +15,7 @@ pub fn run(out: &Out, force: bool) -> Result<ExitCode> {
     let pid_file = ctx.home.data.join("postmaster.pid");
     let Some(pid) = ctx.running_pid() else {
         if pid_file.exists() {
+            process::require_stale_pidfile(&ctx.home.data)?;
             out.note("removing a stale postmaster.pid");
             let _ = std::fs::remove_file(&pid_file);
         }

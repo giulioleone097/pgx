@@ -27,7 +27,9 @@ impl Ctx {
         let install = Install::discover()?;
         install.require_complete()?;
         let home = Home::resolve();
+        crate::fsutil::private_dir(&home.root)?;
         let config = Config::load(&home.config_file)?;
+        crate::fsutil::private_dir(config.run_dir.as_deref().unwrap_or(&home.run))?;
         Ok(Ctx {
             install,
             home,

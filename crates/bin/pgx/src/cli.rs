@@ -85,7 +85,9 @@ pub enum Command {
     },
     Doctor,
     /// Hidden: the background TTL cleanup worker, spawned by start/run/serve.
-    Supervise,
+    Supervise {
+        home: Option<String>,
+    },
     Version,
     Help,
 }
@@ -240,8 +242,12 @@ pub fn parse(args: &[String]) -> Result<(Global, Command)> {
         }
         "supervise" => {
             only_flags(&[])?;
-            arity(0, "supervise")?;
-            Command::Supervise
+            if positional.len() > 1 {
+                return Err(PgxError::usage("usage: pgx supervise [home]"));
+            }
+            Command::Supervise {
+                home: positional.first().map(|s| s.to_string()),
+            }
         }
         "url" => {
             only_flags(&["socket"])?;
@@ -412,7 +418,10 @@ mod tests {
                 value: Some("30m".into())
             }
         );
-        assert_eq!(parse(&args("supervise")).unwrap().1, Command::Supervise);
+        assert_eq!(
+            parse(&args("supervise")).unwrap().1,
+            Command::Supervise { home: None }
+        );
         assert_eq!(parse(&args("ttl")).unwrap_err().code, ExitCode::Usage);
         assert_eq!(parse(&args("ttl a b c")).unwrap_err().code, ExitCode::Usage);
         assert_eq!(

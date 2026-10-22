@@ -173,7 +173,10 @@ impl Home {
     pub fn resolve() -> Home {
         let pgx_home = std::env::var("PGX_HOME").ok();
         let home = std::env::var("HOME").ok();
-        Home::from_env(pgx_home.as_deref(), home.as_deref())
+        let home = Home::from_env(pgx_home.as_deref(), home.as_deref());
+        // PGX_HOME is an explicit user-selected location; aliases such as
+        // /tmp -> /private/tmp and home symlinks must share process identity.
+        Home::at(std::fs::canonicalize(&home.root).unwrap_or(home.root))
     }
 
     pub fn is_initialized(&self) -> bool {

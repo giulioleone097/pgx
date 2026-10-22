@@ -44,6 +44,7 @@ pub fn render_pgx_conf(cfg: &Config, sock_dir: &Path, block_clone: bool) -> Stri
          listen_addresses = '{listen}'\n\
          port = {port}\n\
          unix_socket_directories = '{sock}'\n\
+         unix_socket_permissions = 0700\n\
          max_connections = 120\n\
          \n\
          # --- PGX profile: fixed instance cost ----------------------------------------\n\

@@ -46,28 +46,32 @@ pub fn run(out: &Out) -> Result<ExitCode> {
     let mut client = ctx.connect("postgres")?;
     let q = |c: &mut crate::pgwire::Client<std::os::unix::net::UnixStream>,
              sql: &str|
-     -> Option<String> {
-        c.simple_query(sql)
-            .ok()
-            .and_then(|r| r.scalar().map(String::from))
+     -> Result<String> {
+        let result = c
+            .simple_query(sql)
+            .map_err(|e| super::db_error(e, "cannot query runtime status"))?;
+        result.scalar().map(String::from).ok_or_else(|| {
+            crate::errors::PgxError::failure("runtime status query returned no value")
+        })
     };
     let databases: u64 = q(
         &mut client,
         "SELECT count(*) FROM pg_database WHERE NOT datistemplate",
-    )
-    .and_then(|s| s.parse().ok())
-    .unwrap_or(0);
-    let connections: u64 = q(&mut client, "SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'client backend' AND pid <> pg_backend_pid()").and_then(|s| s.parse().ok()).unwrap_or(0);
+    )?
+    .parse()
+    .map_err(|_| crate::errors::PgxError::failure("invalid numeric runtime status"))?;
+    let connections: u64 = q(&mut client, "SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'client backend' AND pid <> pg_backend_pid()")?.parse().map_err(|_| crate::errors::PgxError::failure("invalid numeric runtime status"))?;
     let uptime: u64 = q(
         &mut client,
         "SELECT extract(epoch FROM now() - pg_postmaster_start_time())::bigint",
-    )
-    .and_then(|s| s.parse().ok())
-    .unwrap_or(0);
-    let version = q(&mut client, "SELECT version()").unwrap_or_default();
-    let runtime: Value = q(&mut client, "SELECT pgrust_runtime_status()")
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or(Value::Null);
+    )?
+    .parse()
+    .map_err(|_| crate::errors::PgxError::failure("invalid numeric runtime status"))?;
+    let version = q(&mut client, "SELECT version()")?;
+    let runtime: Value = serde_json::from_str(&q(&mut client, "SELECT pgrust_runtime_status()")?)
+        .map_err(|e| {
+        crate::errors::PgxError::failure(format!("invalid runtime status JSON: {e}"))
+    })?;
     client.close();
     let rss = runtime
         .pointer("/memory/rss_bytes")

@@ -22,7 +22,11 @@ fn main() {
     let (global, command) = match cli::parse(&args) {
         Ok(x) => x,
         Err(e) => {
-            eprintln!("pgx: {e}");
+            if args.iter().any(|a| a == "--json") {
+                println!("{}", e.to_json());
+            } else {
+                eprintln!("pgx: {e}");
+            }
             std::process::exit(e.code as i32);
         }
     };
@@ -55,7 +59,12 @@ fn run(global: cli::Global, command: Command) -> Result<ExitCode> {
         } => cmd::init::run(&out, port, durability, force),
         Command::Serve => cmd::start::serve(&out),
         Command::Run => cmd::run::run(&out),
-        Command::Supervise => cmd::supervise::run(&out),
+        Command::Supervise { home } => {
+            if let Some(home) = home {
+                std::env::set_var("PGX_HOME", home);
+            }
+            cmd::supervise::run(&out)
+        }
         Command::Doctor => cmd::doctor::run(&out),
         other => {
             let home = layout::Home::resolve();
@@ -87,7 +96,7 @@ fn run(global: cli::Global, command: Command) -> Result<ExitCode> {
                 | Command::Run
                 | Command::Doctor
                 | Command::Serve
-                | Command::Supervise => unreachable!(),
+                | Command::Supervise { .. } => unreachable!(),
             }
         }
     }

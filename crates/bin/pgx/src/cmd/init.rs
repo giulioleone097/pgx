@@ -66,6 +66,12 @@ pub fn run(
     let install = Install::discover()?;
     install.require_complete()?;
     let home = Home::resolve();
+    let _run_lock = if force {
+        Some(super::run::acquire_run_lock(&home)?)
+    } else {
+        None
+    };
+    let _start_lock = super::start::StartLock::acquire_home(&home)?;
     let durability = match durability {
         Some(d) => Durability::parse(&d)?,
         None => Durability::Ephemeral,
@@ -101,6 +107,13 @@ pub fn run(
                 .map_err(|e| PgxError::io("cannot remove", &home.data, &e))?;
         }
         let _ = std::fs::remove_file(&home.config_file);
+        let ttl_dir = crate::ttlstore::MetaStore::new(&home.root)
+            .dir()
+            .to_path_buf();
+        if ttl_dir.exists() {
+            std::fs::remove_dir_all(&ttl_dir)
+                .map_err(|e| PgxError::io("cannot remove old TTL records", &ttl_dir, &e))?;
+        }
     }
 
     let run_override = std::env::var("PGX_RUN_DIR")
@@ -126,9 +139,8 @@ pub fn run(
             .collect(),
         _ => vec!["127.0.0.1".into(), "::1".into()],
     };
-    std::fs::create_dir_all(&home.root)
-        .map_err(|e| PgxError::io("cannot create", &home.root, &e))?;
-    std::fs::create_dir_all(&sock_dir).map_err(|e| PgxError::io("cannot create", &sock_dir, &e))?;
+    fsutil::private_dir(&home.root)?;
+    fsutil::private_dir(&sock_dir)?;
 
     // The cluster: copy to data.tmp, configure, then rename into place.
     let tmp = home.root.join("data.tmp");

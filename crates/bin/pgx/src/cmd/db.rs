@@ -79,6 +79,37 @@ pub fn record_ttl(
     Ok(ttl)
 }
 
+/// SQL CREATE DATABASE cannot participate in a filesystem transaction. If the
+/// durable TTL commit fails, compensate with DROP and report both failures if
+/// compensation also fails. Never return a generic error while silently
+/// leaving a permanent database behind.
+fn finish_creation(
+    ctx: &Ctx,
+    client: &mut Client,
+    name: &DbName,
+    ttl_arg: Option<&str>,
+) -> Result<crate::ttl::Ttl> {
+    match record_ttl(ctx, client, name, ttl_arg) {
+        Ok(ttl) => Ok(ttl),
+        Err(error) => {
+            match client.simple_query(&format!("DROP DATABASE {} WITH (FORCE)", name.quoted())) {
+                Ok(_) => {
+                    let _ = crate::ttlstore::MetaStore::new(&ctx.home.root).remove(name.as_str());
+                    Err(PgxError::failure(format!(
+                        "cannot persist TTL for {name}; database creation was rolled back: {error}"
+                    )))
+                }
+                Err(cleanup) => Err(PgxError::failure(format!(
+                    "cannot persist TTL for {name}: {error}; rollback failed: {cleanup}"
+                ))
+                .hint(format!(
+                    "drop {name} manually before retrying; it may remain without a TTL"
+                ))),
+            }
+        }
+    }
+}
+
 /// JSON fields describing a TTL for command output.
 pub fn ttl_json(ttl: &crate::ttl::Ttl, expires_at: Option<u64>, now: u64) -> serde_json::Value {
     json!({
@@ -143,12 +174,14 @@ pub fn create(out: &Out, name: &str, ttl_arg: Option<&str>) -> Result<ExitCode> 
         crate::ttl::parse_ttl(s)?;
     }
     let ctx = Ctx::load()?;
+    let store = crate::ttlstore::MetaStore::new(&ctx.home.root);
+    let _lock = store.lock(name.as_str())?;
     let mut client = ctx.connect("postgres")?;
     client
         .simple_query(&format!("CREATE DATABASE {}", name.quoted()))
         .map_err(|e| db_error(e, &format!("cannot create database {name}")))?;
     let now = crate::fsutil::now_epoch();
-    let ttl = record_ttl(&ctx, &mut client, &name, ttl_arg)?;
+    let ttl = finish_creation(&ctx, &mut client, &name, ttl_arg)?;
     let expires_at = ttl.expires_at(now)?;
     client.close();
     let url = tcp_url(&ctx, name.as_str());
@@ -181,6 +214,8 @@ fn merge(obj: &mut serde_json::Value, extra: serde_json::Value) {
 pub fn drop(out: &Out, name: &str, force: bool) -> Result<ExitCode> {
     let name = names::validate_user_target(name)?;
     let ctx = Ctx::load()?;
+    let store = crate::ttlstore::MetaStore::new(&ctx.home.root);
+    let _lock = store.lock(name.as_str())?;
     let mut client = ctx.connect("postgres")?;
     if !exists(&ctx, &mut client, &name)? {
         return Err(PgxError::new(
@@ -202,6 +237,7 @@ pub fn drop(out: &Out, name: &str, force: bool) -> Result<ExitCode> {
             err
         }
     })?;
+    store.remove(name.as_str())?;
     client.close();
     out.emit(
         &format!("dropped database {name}"),
@@ -217,6 +253,8 @@ pub fn clone(out: &Out, source: &str, target: &str, ttl_arg: Option<&str>) -> Re
         crate::ttl::parse_ttl(s)?;
     }
     let ctx = Ctx::load()?;
+    let store = crate::ttlstore::MetaStore::new(&ctx.home.root);
+    let _lock = store.lock(target.as_str())?;
     let mut client = ctx.connect("postgres")?;
     if !exists(&ctx, &mut client, &source)? {
         return Err(PgxError::new(
@@ -260,7 +298,7 @@ pub fn clone(out: &Out, source: &str, target: &str, ttl_arg: Option<&str>) -> Re
     let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
     // TTL is never inherited from the source: it comes only from --ttl here.
     let now = crate::fsutil::now_epoch();
-    let ttl = record_ttl(&ctx, &mut client, &target, ttl_arg)?;
+    let ttl = finish_creation(&ctx, &mut client, &target, ttl_arg)?;
     let expires_at = ttl.expires_at(now)?;
     client.close();
     let url = tcp_url(&ctx, target.as_str());
@@ -290,7 +328,7 @@ pub fn ls(out: &Out) -> Result<ExitCode> {
         .simple_query(
             "SELECT d.datname, pg_database_size(d.oid), d.datistemplate, \
              (SELECT count(*) FROM pg_stat_activity a WHERE a.datname = d.datname AND a.backend_type = 'client backend'), \
-             d.datconnlimit = -2 \
+             d.datconnlimit = -2, d.oid \
              FROM pg_database d WHERE NOT d.datistemplate ORDER BY d.datname",
         )
         .map_err(|e| db_error(e, "cannot list databases"))?;
@@ -310,7 +348,13 @@ pub fn ls(out: &Out) -> Result<ExitCode> {
         let size: u64 = row[1].as_deref().and_then(|s| s.parse().ok()).unwrap_or(0);
         let conns: u64 = row[3].as_deref().and_then(|s| s.parse().ok()).unwrap_or(0);
         let invalid = row[4].as_deref() == Some("t");
-        let rec = rec_by_name.get(name.as_str());
+        let oid = row
+            .get(5)
+            .and_then(|v| v.as_deref())
+            .and_then(|v| v.parse::<u64>().ok());
+        let rec = rec_by_name
+            .get(name.as_str())
+            .filter(|r| r.cluster_id == ctx.cluster_id() && Some(r.oid) == oid);
         let (ttl_label, expires_at, ttl_seconds) = match rec {
             Some(r) => (r.ttl_label.clone(), r.expires_at, r.ttl_seconds),
             None => ("unlimited".to_string(), None, None),

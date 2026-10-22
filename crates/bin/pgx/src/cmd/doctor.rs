@@ -147,9 +147,7 @@ fn ttl_checks(home: &Home, running: bool) -> Vec<Check> {
     let mut checks = Vec::new();
 
     // Supervisor liveness from its pid file (read-only; the lock stays untouched).
-    let sup_pid = std::fs::read_to_string(home.root.join("supervisor.pid"))
-        .ok()
-        .and_then(|s| s.trim().parse::<u32>().ok());
+    let sup_pid = process::supervisor_pid(home);
     match sup_pid {
         Some(pid) if process::pid_alive(pid) => checks.push(ok(
             "ttl_worker",
