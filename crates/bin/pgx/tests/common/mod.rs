@@ -6,7 +6,6 @@
 //! Needs `PGX_DIST=<assembled prefix>` (see dist/assemble.sh). Without it the
 //! harness fails loudly: these suites are release gates, never silent skips.
 #![allow(dead_code)]
-use std::net::TcpListener;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -43,15 +42,22 @@ pub fn dist_prefix() -> PathBuf {
 }
 
 fn port_is_free(port: u16) -> bool {
-    let Ok(_v4) = TcpListener::bind(("127.0.0.1", port)) else {
-        return false;
-    };
-    match TcpListener::bind(("::1", port)) {
-        Ok(_) => true,
-        Err(e) => {
-            e.kind() == std::io::ErrorKind::AddrNotAvailable
-                || e.raw_os_error() == Some(libc::EAFNOSUPPORT)
-        }
+    // Parent threads may fork at any point, including direct .cmd().spawn()
+    // callers. A sibling child inheriting a probe listener can keep this port
+    // busy after the probe returns, producing init's transient exit 4. Bind in
+    // a separate, single-thread process so these sockets cannot be inherited.
+    let helper = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../tests/pgx/lib/port_probe.py");
+    let result = Command::new("python3")
+        .args(["-I", &helper.to_string_lossy(), &port.to_string()])
+        .output()
+        .expect("spawn isolated loopback port probe (python3 required)");
+    match result.status.code() {
+        Some(0) => true,
+        Some(1) => false,
+        _ => panic!(
+            "port probe failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        ),
     }
 }
 
