@@ -56,7 +56,7 @@ class ParallelLimits(unittest.TestCase):
                 # connection observe the actual worker before its allocation.
                 query = (
                     "SELECT length(repeat('x', n + "
-                    "CASE WHEN pg_sleep(0.3) IS NULL THEN 0 ELSE 0 END)) "
+                    "CASE WHEN pg_sleep(1) IS NULL THEN 0 ELSE 0 END)) "
                     "FROM oom_input"
                 )
                 plan = json.loads(
