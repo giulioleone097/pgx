@@ -5,13 +5,11 @@ stopped and deleted on exit, even on failure.
     PGX_DIST=<prefix> is required (dist/assemble.sh --out ...).
 """
 import json
-import errno
 import fcntl
 import os
 import secrets
 import shutil
 import signal
-import socket
 import subprocess
 import sys
 import time
@@ -64,17 +62,18 @@ def reserve_port():
         lease = open(os.path.join(leases, "%d.lock" % port), "a")
         try:
             fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            with socket.socket() as ipv4:
-                ipv4.bind(("127.0.0.1", port))
-                try:
-                    with socket.socket(socket.AF_INET6) as ipv6:
-                        ipv6.bind(("::1", port))
-                except OSError as e:
-                    if e.errno not in (errno.EAFNOSUPPORT, errno.EPROTONOSUPPORT, errno.EADDRNOTAVAIL):
-                        raise
-            return port, lease
-        except (BlockingIOError, OSError):
+        except BlockingIOError:
             lease.close()
+            continue
+        # Probe in a single-thread child: a sibling thread spawning a CLI must
+        # never inherit the temporary listening sockets and keep the port busy.
+        probe = subprocess.run([sys.executable, "-I", os.path.join(HERE, "port_probe.py"), str(port)],
+                               capture_output=True, text=True)
+        if probe.returncode == 0:
+            return port, lease
+        lease.close()
+        if probe.returncode != 1:
+            raise RuntimeError("port probe failed: " + probe.stderr)
     raise RuntimeError("no unleased non-ephemeral test port available")
 
 
