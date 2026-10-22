@@ -101,6 +101,33 @@ fn limit_enforced_via_try_reserve() {
 }
 
 #[test]
+fn fallible_reserve_refuses_without_unwinding_or_losing_existing_data() {
+    let ctx = MemoryContext::new("optional-cache").with_limit(16);
+    let mut v: PgVec<u8> = PgVec::new_in(ctx.mcx());
+    v.try_reserve_exact(8).unwrap();
+    v.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+    let before = ctx.used();
+    assert!(with_fallible_allocations(|| v.try_reserve_exact(16)).is_err());
+    assert_eq!(&v[..], &[1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(ctx.used(), before);
+    assert!(with_fallible_allocations(|| with_fallible_allocations(|| v.try_reserve_exact(16))).is_err());
+    let e = refused(|| { let _ = v.try_reserve_exact(16); });
+    assert_eq!(e.sqlstate, ERRCODE_OUT_OF_MEMORY, "ordinary allocations still become statement errors");
+}
+
+#[test]
+fn huge_reserve_refusal_preserves_vector_and_context_accounting() {
+    let ctx = MemoryContext::new("sort-array").with_limit(16);
+    let mut v: PgVec<u8> = PgVec::new_in(ctx.mcx());
+    v.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+    let before = ctx.used();
+    let e = vec_reserve_huge(&mut v, 24).unwrap_err();
+    assert_eq!(e.sqlstate, ERRCODE_OUT_OF_MEMORY);
+    assert_eq!(&v[..], &[1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(ctx.used(), before);
+}
+
+#[test]
 fn oom_error_shape_matches_mcxt_c() {
     let ctx = MemoryContext::new("ExprContext").with_limit(8);
     let mcx = ctx.mcx();
@@ -1942,6 +1969,23 @@ fn limits_refuse_only_enforced_threads_and_name_the_ceiling() {
     })
     .join()
     .unwrap();
+
+    // Parallel work shares one session budget: the leader's 3MB plus a
+    // worker's 2MB must fail at 4MB, even though each thread is below 4MB.
+    std::thread::spawn(move || {
+        limits::enforce(true);
+        let ctx = MemoryContext::new("parallel-leader");
+        let _v: PgVec<'_, u8> = vec_with_capacity_in(ctx.mcx(), 3 * MB).unwrap();
+        let session = limits::capture_session();
+        std::thread::spawn(move || {
+            {
+                let _binding = limits::bind_session(&session);
+                assert!(alloc(2 * MB).is_err(), "workers must not multiply the session ceiling");
+                assert!(alloc(MB / 2).is_ok(), "small work still fits");
+            }
+            assert!(alloc(16 * MB).is_ok(), "binding restores a reused worker's policy");
+        }).join().unwrap();
+    }).join().unwrap();
 
     // Database ceiling: 8MB across two threads of database 4_200_001.
     limits::configure(0, 8 * MB, 0);

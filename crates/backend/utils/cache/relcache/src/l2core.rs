@@ -249,10 +249,10 @@ pub fn interned_core_counts() -> (usize, usize) {
     })
 }
 
-/// l2cache byte charge for a core: a reused (shared) core costs its holder
-/// only the entry, not another copy of the content.
-pub(crate) fn charge_bytes(core: &RelCoreShared, shared: bool) -> usize {
-    if shared { core::mem::size_of::<usize>() * 8 } else { core.approx_bytes() }
+/// Full content size; l2cache deduplicates its charge by Arc identity and
+/// retains it until the last map holder is removed, regardless of eviction order.
+pub(crate) fn charge_bytes(core: &RelCoreShared, _shared: bool) -> usize {
+    core.approx_bytes()
 }
 
 // SAFETY: immutable after construction and publication. The lone interior-

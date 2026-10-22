@@ -479,7 +479,8 @@ fn evict_shard(
         if count.load(Ordering::Relaxed) <= budget {
             break;
         }
-        while let Some((_, _, sz)) = b.entries.pop() {
+        while let Some((_, value, sz)) = b.entries.pop() {
+            uncharge_value(&value);
             n_removed += 1;
             bytes_removed += sz;
             count.fetch_sub(1, Ordering::Relaxed);
@@ -511,6 +512,47 @@ fn shard_of(key: &L2Key) -> &'static Shard {
 // Stats (memory gate: the L2's total size counted once).
 static ENTRIES: AtomicUsize = AtomicUsize::new(0);
 static BYTES: AtomicUsize = AtomicUsize::new(0);
+
+// Different database keys can reference the same interned immutable core.
+// Track map holders by Arc identity so removing the first publisher cannot
+// remove the content's charge while another key still retains it. Lock order:
+// shard map, then this ledger; the ledger never takes a shard lock.
+#[derive(Default)]
+struct SharedBytes(HashMap<usize, (usize, usize)>); // identity -> (holders, bytes)
+
+impl SharedBytes {
+    fn insert(&mut self, identity: usize, bytes: usize) -> usize {
+        let e = self.0.entry(identity).or_insert((0, bytes));
+        debug_assert_eq!(e.1, bytes, "one immutable allocation has one size");
+        e.0 += 1;
+        if e.0 == 1 { e.1 } else { 0 }
+    }
+
+    fn remove(&mut self, identity: usize) -> usize {
+        let Some(e) = self.0.get_mut(&identity) else { return 0; };
+        e.0 -= 1;
+        if e.0 == 0 { self.0.remove(&identity).unwrap().1 } else { 0 }
+    }
+}
+
+fn shared_bytes() -> &'static Mutex<SharedBytes> {
+    static LEDGER: std::sync::OnceLock<Mutex<SharedBytes>> = std::sync::OnceLock::new();
+    LEDGER.get_or_init(|| Mutex::new(SharedBytes::default()))
+}
+
+fn charge_value(value: &L2Value, bytes: usize) {
+    let identity = Arc::as_ptr(value) as *const () as usize;
+    let mut ledger = shared_bytes().lock().unwrap();
+    BYTES.fetch_add(ledger.insert(identity, bytes), Ordering::Relaxed);
+}
+
+fn uncharge_value(value: &L2Value) -> usize {
+    let identity = Arc::as_ptr(value) as *const () as usize;
+    let mut ledger = shared_bytes().lock().unwrap();
+    let bytes = ledger.remove(identity);
+    BYTES.fetch_sub(bytes, Ordering::Relaxed);
+    bytes
+}
 static HITS: AtomicU64 = AtomicU64::new(0);
 static MISSES: AtomicU64 = AtomicU64::new(0);
 static INSERTS: AtomicU64 = AtomicU64::new(0);
@@ -636,7 +678,7 @@ pub fn insert(
 
     bucket.entries.push((gen, Arc::clone(&entry), bytes));
     ENTRIES.fetch_add(1, Ordering::Relaxed);
-    BYTES.fetch_add(bytes, Ordering::Relaxed);
+    charge_value(&entry, bytes);
     INSERTS.fetch_add(1, Ordering::Relaxed);
     shard.count.fetch_add(1, Ordering::Relaxed);
 
@@ -653,11 +695,11 @@ pub fn insert(
             }
         }
     }
-    bucket.entries.retain(|(g, e, sz)| {
+    bucket.entries.retain(|(g, e, _sz)| {
         let keep = !matches(e.as_ref()) || *g == newest || *g == second;
         if !keep {
             ENTRIES.fetch_sub(1, Ordering::Relaxed);
-            BYTES.fetch_sub(*sz, Ordering::Relaxed);
+            uncharge_value(e);
             shard.count.fetch_sub(1, Ordering::Relaxed);
         }
         keep
@@ -671,9 +713,8 @@ pub fn insert(
     // the budget — a miss simply re-fetches from the underlying cache/catalog.
     let budget = shard_budget();
     if budget != 0 && shard.count.load(Ordering::Relaxed) > budget {
-        let (n, b) = evict_shard(&mut map, &shard.count, budget);
+        let (n, _) = evict_shard(&mut map, &shard.count, budget);
         ENTRIES.fetch_sub(n, Ordering::Relaxed);
-        BYTES.fetch_sub(b, Ordering::Relaxed);
     }
     entry
 }
@@ -700,16 +741,15 @@ pub fn purge_database(db: Oid) -> (usize, usize) {
             if k.db != db {
                 return true;
             }
-            for (_, _, sz) in b.entries.iter() {
+            for (_, value, _) in b.entries.iter() {
                 n_removed += 1;
-                bytes_removed += *sz;
+                bytes_removed += uncharge_value(value);
                 s.count.fetch_sub(1, Ordering::Relaxed);
             }
             false
         });
     }
     ENTRIES.fetch_sub(n_removed, Ordering::Relaxed);
-    BYTES.fetch_sub(bytes_removed, Ordering::Relaxed);
     (n_removed, bytes_removed)
 }
 
@@ -726,10 +766,9 @@ pub fn purge_key(key: L2Key) -> (usize, usize) {
         return (0, 0);
     };
     let n = b.entries.len();
-    let bytes: usize = b.entries.iter().map(|(_, _, sz)| *sz).sum();
+    let bytes: usize = b.entries.iter().map(|(_, value, _)| uncharge_value(value)).sum();
     shard.count.fetch_sub(n, Ordering::Relaxed);
     ENTRIES.fetch_sub(n, Ordering::Relaxed);
-    BYTES.fetch_sub(bytes, Ordering::Relaxed);
     (n, bytes)
 }
 
@@ -738,9 +777,9 @@ pub fn clear_all() {
     for s in shards().iter() {
         let mut map = s.map.lock().unwrap();
         for (_, b) in map.iter() {
-            for (_, _, sz) in b.entries.iter() {
+            for (_, value, _) in b.entries.iter() {
                 ENTRIES.fetch_sub(1, Ordering::Relaxed);
-                BYTES.fetch_sub(*sz, Ordering::Relaxed);
+                uncharge_value(value);
                 s.count.fetch_sub(1, Ordering::Relaxed);
             }
         }
@@ -840,8 +879,27 @@ pub fn acquire_gate(key: L2Key, gen: u64) -> GateOutcome {
 
 #[cfg(test)]
 mod tests {
+    // Tests mutate process-global cache/statistics; serialize their fixtures.
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn shared_content_stays_charged_until_the_last_map_holder_leaves() {
+        let _test_lock = TEST_LOCK.lock().unwrap();
+        let mut ledger = super::SharedBytes::default();
+        let mut bytes = ledger.insert(42, 8192);
+        bytes += ledger.insert(42, 8192);
+        assert_eq!(bytes, 8192);
+        bytes -= ledger.remove(42); // original publisher evicted
+        assert_eq!(bytes, 8192, "the surviving clone still owns the content");
+        bytes -= ledger.remove(42);
+        assert_eq!(bytes, 0);
+        assert!(ledger.0.is_empty());
+        assert_eq!(ledger.insert(42, 4096), 4096, "address reuse is a new allocation");
+    }
+
     #[test]
     fn out_of_range_cache_id_is_inert() {
+        let _test_lock = TEST_LOCK.lock().unwrap();
         // ids arrive from WAL/2PC/sinval: 96..=127 decode but exceed CAT_DOMAINS.
         for id in [96, 100, 127] {
             super::bump(super::Domain::Cat(id));
@@ -851,6 +909,24 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn purging_the_original_shared_core_holder_keeps_live_content_charged() {
+        let _test_lock = TEST_LOCK.lock().unwrap();
+        let before = stats().bytes;
+        let a = L2Key { kind: KIND_REL, id: 9_300_001, db: 4_300_001, hash: 0 };
+        let b = L2Key { db: 4_300_002, ..a };
+        let value: L2Value = Arc::new(E(77));
+        insert(a, 1, Arc::clone(&value), 8192, is_e(77));
+        insert(b, 1, Arc::clone(&value), 8192, is_e(77));
+        assert_eq!(stats().bytes, before + 8192);
+        assert_eq!(purge_key(a), (1, 0));
+        assert!(lookup(b, 1, is_e(77)).is_some());
+        assert_eq!(stats().bytes, before + 8192);
+        assert_eq!(purge_key(b), (1, 8192));
+        assert_eq!(stats().bytes, before);
+    }
+
 
     #[derive(Debug)]
     struct E(u32);
@@ -865,6 +941,7 @@ mod tests {
 
     #[test]
     fn lookup_is_generation_exact() {
+        let _test_lock = TEST_LOCK.lock().unwrap();
         let k = key(1001);
         insert(k, 3, Arc::new(E(1)), 8, is_e(1));
         assert!(lookup(k, 3, is_e(1)).is_some());
@@ -874,6 +951,7 @@ mod tests {
 
     #[test]
     fn insert_keeps_two_newest_generations() {
+        let _test_lock = TEST_LOCK.lock().unwrap();
         let k = key(1002);
         insert(k, 1, Arc::new(E(7)), 8, is_e(7));
         insert(k, 2, Arc::new(E(7)), 8, is_e(7));
@@ -885,6 +963,7 @@ mod tests {
 
     #[test]
     fn duplicate_publish_converges() {
+        let _test_lock = TEST_LOCK.lock().unwrap();
         let k = key(1003);
         let a = insert(k, 1, Arc::new(E(9)), 8, is_e(9));
         let b = insert(k, 1, Arc::new(E(9)), 8, is_e(9));
@@ -893,6 +972,7 @@ mod tests {
 
     #[test]
     fn hash_collisions_are_disambiguated_by_matcher() {
+        let _test_lock = TEST_LOCK.lock().unwrap();
         let k = key(1004);
         insert(k, 1, Arc::new(E(1)), 8, is_e(1));
         insert(k, 1, Arc::new(E(2)), 8, is_e(2));
@@ -903,6 +983,7 @@ mod tests {
 
     #[test]
     fn view_lags_until_sync() {
+        let _test_lock = TEST_LOCK.lock().unwrap();
         let d = Domain::Cat(90); // slot untouched by other tests
         let v0 = view_gen(d);
         let g = gen_slot(d).fetch_add(1, Ordering::SeqCst) + 1; // foreign bump
@@ -913,6 +994,7 @@ mod tests {
 
     #[test]
     fn bump_advances_own_view() {
+        let _test_lock = TEST_LOCK.lock().unwrap();
         let d = Domain::Rel(0xF000_0001);
         bump(d);
         assert_eq!(view_gen(d), current_gen(d));
@@ -920,6 +1002,7 @@ mod tests {
 
     #[test]
     fn gate_owner_then_waiter() {
+        let _test_lock = TEST_LOCK.lock().unwrap();
         let k = key(1005);
         let GateOutcome::Owner(guard) = acquire_gate(k, 1) else {
             panic!("first acquire must own");
@@ -939,6 +1022,7 @@ mod tests {
 
     #[test]
     fn purge_database_removes_only_that_database() {
+        let _test_lock = TEST_LOCK.lock().unwrap();
         // Oids no other test uses: the map is process-global.
         const DB_A: Oid = 4_100_001;
         const DB_B: Oid = 4_100_002;
@@ -961,6 +1045,7 @@ mod tests {
 
     #[test]
     fn evict_shard_bounds_a_shard_to_its_budget() {
+        let _test_lock = TEST_LOCK.lock().unwrap();
         // Simulate an attacker publishing many distinct-key negative entries
         // into one shard. Eviction must bring it back to budget and report the
         // exact deltas, with `count` kept consistent.
@@ -996,6 +1081,7 @@ mod tests {
 
     #[test]
     fn purge_key_drops_all_generations_of_one_key() {
+        let _test_lock = TEST_LOCK.lock().unwrap();
         let k = L2Key { kind: KIND_CAT, id: 21, db: types_core::InvalidOid, hash: 0xDEAD_0021 };
         let other = L2Key { hash: 0xDEAD_0022, ..k };
         let v: L2Value = Arc::new(1u32);
@@ -1011,6 +1097,7 @@ mod tests {
 
     #[test]
     fn shard_budget_covers_the_configured_cap() {
+        let _test_lock = TEST_LOCK.lock().unwrap();
         // Per-shard budgets must sum to at least the global cap so the cap is
         // never under-enforced, and 0 (disabled) must propagate.
         let b = shard_budget();
@@ -1024,6 +1111,7 @@ mod tests {
 
     #[test]
     fn gate_wait_times_out() {
+        let _test_lock = TEST_LOCK.lock().unwrap();
         let k = key(1006);
         let GateOutcome::Owner(_guard) = acquire_gate(k, 2) else {
             panic!("first acquire must own");
@@ -1042,6 +1130,7 @@ mod tests {
     // stripe (the shared core's index-access arrays come from those rows).
     #[test]
     fn opclass_catcache_bump_moves_every_rel_stripe() {
+        let _test_lock = TEST_LOCK.lock().unwrap();
         let before = rel_gen_snapshot();
         bump(Domain::Cat(5)); // AMPROCNUM
         let after = rel_gen_snapshot();

@@ -469,7 +469,7 @@ impl<'mcx> HashJoinTable<'mcx> {
                     let t = self.track.as_mut().expect("just checked");
                     if t.keys.len() == t.keys.capacity() {
                         let add = t.keys.capacity().max(256);
-                        kill = t.keys.try_reserve(add).is_err();
+                        kill = mcx::with_fallible_allocations(|| t.keys.try_reserve(add)).is_err();
                     }
                     if !kill {
                         t.keys.push(tracked);

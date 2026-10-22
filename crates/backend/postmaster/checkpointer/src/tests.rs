@@ -195,3 +195,29 @@ fn shmem_init_registers_checkpointer_data() {
     assert_eq!(cp.max_requests, 64);
     assert_eq!(cp.requests.len(), 64);
 }
+
+#[test]
+fn queue_compaction_allocation_refusal_keeps_the_queue_for_retry() {
+    let _lock = TEST_LOCK.lock().unwrap();
+    let cp = shmem_for_tests();
+    // SAFETY: TEST_LOCK serializes this test's access to the shared queue.
+    unsafe {
+        cp.num_requests.set(1);
+        cp.requests[0].set(test_request(42));
+    }
+    COMPACT_SCRATCH_TEST_LIMIT.store(1, Relaxed);
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            COMPACT_SCRATCH_TEST_LIMIT.store(0, Relaxed);
+        }
+    }
+    let _reset = Reset;
+    assert!(!CompactCheckpointerRequestQueue().unwrap());
+    // A handled allocation failure neither unwinds nor loses fsync requests.
+    unsafe {
+        assert_eq!(cp.num_requests.get(), 1);
+        assert_eq!(cp.requests[0].get().ftag.rlocator.relNumber, 42);
+        cp.num_requests.set(0);
+    }
+}

@@ -863,9 +863,14 @@ pub fn InitPostgres(
     gtrace("p.dblookup");
     init_small::globals::SetMyDatabaseId(dboid);
     // pgrust-only memory limits: every thread attached to a database is
-    // charged to it; only client backends are ever refused.
+    // charged to it. Parallel query workers execute tenant work too; unlike
+    // maintenance workers, they must obey the leader's memory ceilings.
     mcx::limits::join_database(dboid);
-    mcx::limits::enforce(miscinit::GetMyBackendType() == BackendType::Backend);
+    mcx::limits::enforce(
+        miscinit::GetMyBackendType() == BackendType::Backend
+            || (parallel_seams::initializing_parallel_worker::is_installed()
+                && parallel_seams::initializing_parallel_worker::call()),
+    );
 
     // MyProc->databaseId: plain atomic store, no lock (C relies on the
     // database lock for searchers of this database's ID).

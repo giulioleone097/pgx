@@ -133,6 +133,7 @@ pub enum WorkerMessage {
 }
 
 pub struct ParallelShared {
+    memory_session: mcx::limits::SessionHandle,
     pub database_id: Oid,
     pub authenticated_user_id: Oid,
     pub session_user_id: Oid,
@@ -475,6 +476,7 @@ pub fn InitializeParallelDSM(id: ParallelContextId) -> PgResult<()> {
         with_pcxt(id, |p| (p.library_name.clone(), p.function_name.clone()));
 
     let shared = Arc::new(ParallelShared {
+        memory_session: mcx::limits::capture_session(),
         database_id: g::MyDatabaseId(),
         authenticated_user_id: miscinit::GetAuthenticatedUserId(),
         session_user_id: miscinit::GetSessionUserId(),
@@ -617,6 +619,7 @@ pub fn statement_task_shared(
         | u8::from(policy.invals_flush) * QUERY_TASK_INVALS_FLUSH;
 
     Ok(Some(Arc::new(ParallelShared {
+        memory_session: mcx::limits::capture_session(),
         database_id: g::MyDatabaseId(),
         authenticated_user_id: miscinit::GetAuthenticatedUserId(),
         session_user_id: miscinit::GetSessionUserId(),
@@ -1614,6 +1617,7 @@ fn test_warm_window_fail() -> PgResult<()> {
 }
 
 fn parallel_worker_body(shared: &Arc<ParallelShared>, _worker_number: i32) -> PgResult<()> {
+    let _memory_session = mcx::limits::bind_session(&shared.memory_session);
     test_warm_window_fail()?;
     // C 1400-1402: leader already gone — exit quietly (Terminate still sent).
     if !lmgr_proc::BecomeLockGroupMember(

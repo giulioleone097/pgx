@@ -84,6 +84,10 @@ static SHUTDOWN_XLOG_PENDING: AtomicBool = AtomicBool::new(false);
 pub(crate) static ABSORB_SCRATCH_TEST_LIMIT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+#[cfg(test)]
+static COMPACT_SCRATCH_TEST_LIMIT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 pub fn CheckPointTimeout() -> i32 {
     CHECK_POINT_TIMEOUT.get()
 }
@@ -866,14 +870,21 @@ fn CompactCheckpointerRequestQueue() -> PgResult<bool> {
     let n = num_requests.max(0) as usize;
 
     let scratch = mcx::MemoryContext::new("CompactCheckpointerRequestQueue");
+    #[cfg(test)]
+    let scratch = {
+        let limit = COMPACT_SCRATCH_TEST_LIMIT.load(Relaxed);
+        if limit == 0 { scratch } else { scratch.with_limit(limit) }
+    };
     let mut skip_slot: mcx::PgVec<'_, bool> = mcx::PgVec::new_in(scratch.mcx());
-    if skip_slot.try_reserve(n).is_err() {
+    if mcx::with_fallible_allocations(|| skip_slot.try_reserve(n)).is_err() {
         return Ok(false);
     }
     skip_slot.resize(n, false);
     let mut htab: mcx::PgHashMap<'_, CheckpointerRequest, i32> =
         mcx::PgHashMap::new_in(scratch.mcx());
-    let _ = htab.try_reserve(n);
+    if mcx::with_fallible_allocations(|| htab.try_reserve(n)).is_err() {
+        return Ok(false);
+    }
     let mut num_skipped = 0;
 
     for i in 0..num_requests {

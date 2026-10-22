@@ -343,15 +343,18 @@ fn announce(state: &mut WatchState, l: &Ledger, base: i32) {
     }
 }
 
-fn tick(state: &mut WatchState) {
-    // Enforced limits are independent of the watchdog's master switch; this
-    // thread is merely the one that carries SIGHUP-changed values to mcx.
+fn configure_limits() {
     let mb = |v: i32| (v.max(0) as usize) << 20;
     mcx::limits::configure(
         mb(guc_tables::backing::pgrust_session_memory_limit()),
         mb(guc_tables::backing::pgrust_database_memory_limit()),
         mb(guc_tables::backing::pgrust_runtime_memory_limit()),
     );
+}
+
+fn tick(state: &mut WatchState) {
+    // Enforced limits are independent of the watchdog's master switch.
+    configure_limits();
     if !guc_tables::backing::pgrust_memory_watchdog() {
         state.latched = 0;
         state.announced = None; // re-announce on re-enable
@@ -387,14 +390,18 @@ fn tick(state: &mut WatchState) {
 /// so the watchdog's lines read as the postmaster's — C has no such thread,
 /// and the closest C analogue of "the process noticed its memory" is the
 /// postmaster speaking.
-pub fn start(thread_init: impl FnOnce() + Send + 'static) {
+pub fn start(thread_init: impl FnOnce() + Send + 'static) -> types_error::PgResult<()> {
+    // Arm limits before accepting any client, rather than after the first
+    // sampler sleep. Failure to spawn must fail startup, never silently leave
+    // an apparently limited runtime unprotected.
+    configure_limits();
     // elog's per-thread config (C's globals, inherited at fork) is
     // thread-local here and the watchdog thread binds no GUC store: carry
     // the postmaster's log_line_prefix and log_timezone over at spawn so
     // its lines print with the same prefix as everyone else's.
     let log_line_prefix = elog::config::log_line_prefix_format();
     let log_tz = localtime::globals::log_timezone();
-    let _ = std::thread::Builder::new()
+    std::thread::Builder::new()
         .name("pg:memwatchdog".into())
         .stack_size(256 * 1024)
         .spawn(move || {
@@ -412,7 +419,11 @@ pub fn start(thread_init: impl FnOnce() + Send + 'static) {
                     tick(&mut state)
                 }));
             }
-        });
+        })
+        .map(|_| ())
+        .map_err(|e| Box::new(types_error::PgError::error(
+            format!("could not start memory watchdog: {e}")
+        )))
 }
 
 #[cfg(test)]

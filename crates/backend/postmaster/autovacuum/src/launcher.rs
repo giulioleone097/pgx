@@ -47,10 +47,6 @@ thread_local! {
     // C DatabaseList (launcher-private DatabaseListCxt): head first = most
     // distant adl_next_worker; the tail (last) is the soonest.
     static DATABASE_LIST: RefCell<Vec<AvlDbase>> = const { RefCell::new(Vec::new()) };
-    // pgrust.autovacuum_skip_idle_databases: tuples inserted+updated+deleted
-    // per database at the last worker visit (launcher thread only).
-    static LAST_VISIT_MODS: RefCell<std::collections::HashMap<Oid, i64>> =
-        RefCell::new(std::collections::HashMap::new());
     static SKIPPED_IDLE: Cell<u64> = const { Cell::new(0) };
     // When each database was last passed over as idle (launcher thread
     // only). The worker that a skip replaces would have set the database's
@@ -581,26 +577,18 @@ fn get_database_list() -> PgResult<Vec<AvwDbase>> {
 enum StartOutcome {
     /// A worker was asked for this database.
     Launched(Oid),
-    /// This database was due but has had no inserts, updates or deletes
-    /// since its last worker visit: visit recorded, no worker started.
+    /// This database was due but is untouched: no worker started.
     SkippedIdle(Oid),
     None,
 }
 
 /// pgrust.autovacuum_skip_idle_databases (pgrust-only, default off).
 ///
-/// A worker's per-table decisions (relation_needs_vacanalyze) change only
-/// when rows are inserted, updated or deleted, or when xid/multixact age
-/// crosses the freeze limits. The launcher handles the second case before
-/// this check (wraparound-forced databases are never skipped). So a database
-/// whose tuples_inserted + tuples_updated + tuples_deleted is unchanged since
-/// the last worker visit cannot have new work, and a worker launch for it
-/// is pure overhead: a thread, a connection, a catalog load. With thousands
-/// of mostly idle ephemeral databases that overhead was most of the
-/// runtime's idle CPU. Every database still gets its first visit, and any
-/// later write makes it eligible again.
-fn database_mod_count(entry: &pgstat::database::PgStat_StatDBEntry) -> i64 {
-    entry.tuples_inserted + entry.tuples_updated + entry.tuples_deleted
+/// Untouched clones need no worker unless wraparound is due. Written databases
+/// keep PostgreSQL's retry cadence: a previous worker may have been canceled,
+/// skipped a lock, or left dead tuples protected by an old snapshot.
+fn database_is_untouched(entry: &pgstat::database::PgStat_StatDBEntry) -> bool {
+    entry.tuples_inserted == 0 && entry.tuples_updated == 0 && entry.tuples_deleted == 0
 }
 
 fn do_start_worker() -> PgResult<StartOutcome> {
@@ -704,19 +692,14 @@ fn do_start_worker() -> PgResult<StartOutcome> {
     if let Some(avdb) = avdb {
         if !for_xid_wrap && !for_multi_wrap && skip_idle_databases() {
             if let Some(entry) = pgstat::pgstat_fetch_stat_dbentry(avdb.adw_datid) {
-                let mods = database_mod_count(&entry);
-                // A database never visited counts as visited at zero writes:
-                // one that has had no inserts, updates or deletes since it was
-                // created (a fresh clone of a sealed, frozen, analyzed
-                // template, or an empty CREATE DATABASE) has nothing for a
-                // worker to do, and minting 1000 of them used to cost 1000
-                // worker launches within one naptime. Wraparound is still
-                // checked above for every database. (After a statistics
-                // reset the counters restart at zero; stock autovacuum then
-                // also finds no dead tuples to act on until new writes.)
-                let unchanged =
-                    LAST_VISIT_MODS.with_borrow(|m| m.get(&avdb.adw_datid).copied().unwrap_or(0) == mods);
-                if unchanged {
+                // Only untouched databases are safe to skip. A completed
+                // worker may still leave dead tuples behind (old xmin), and
+                // a requested worker may fail, be canceled or skip a lock.
+                // A write counter observed at launch/completion therefore
+                // cannot prove that an unchanged database needs no retry.
+                // Keep normal scheduling after the first write; untouched
+                // clones still avoid a worker. Wraparound was checked above.
+                if database_is_untouched(&entry) {
                     SKIPPED_IDLE.set(SKIPPED_IDLE.get() + 1);
                     LAST_SKIPPED_AT.with_borrow_mut(|m| {
                         prune_dropped(m, &dblist);
@@ -724,10 +707,6 @@ fn do_start_worker() -> PgResult<StartOutcome> {
                     });
                     return Ok(StartOutcome::SkippedIdle(avdb.adw_datid));
                 }
-                LAST_VISIT_MODS.with_borrow_mut(|m| {
-                    prune_dropped(m, &dblist);
-                    m.insert(avdb.adw_datid, mods);
-                });
             }
         }
         {
@@ -810,6 +789,24 @@ fn loc(routine: &'static str) -> types_error::ErrorLocation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn written_database_stays_eligible_without_additional_writes() {
+        let mut entry = pgstat::database::PgStat_StatDBEntry::default();
+        assert!(database_is_untouched(&entry));
+        entry.tuples_deleted = 1;
+        assert!(!database_is_untouched(&entry));
+        // A failed/canceled worker changes no counters; neither does a
+        // successful vacuum blocked by old xmin. Both must be retried.
+        assert!(!database_is_untouched(&entry));
+        entry.tuples_deleted = 0;
+        entry.tuples_updated = 1;
+        assert!(!database_is_untouched(&entry));
+        entry.tuples_updated = 0;
+        entry.tuples_inserted = 1;
+        assert!(!database_is_untouched(&entry));
+    }
+
 
     // upstream 4cc49cb70396 (18.6): descending by score (3b42bdb471 swapped
     // pg_cmp_s32's arguments); the push-to-head loop then leaves the

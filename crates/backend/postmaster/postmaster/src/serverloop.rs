@@ -200,7 +200,7 @@ pub fn ServerLoop() -> PgResult<i32> {
             init_small::globals::SetPostmasterPid(pm_pid);
             init_small::globals::SetMyStartTime(pm_start);
             launch_backend::logctx::install();
-        });
+        })?;
     }
     // M2 pool-binding: wire the STANDING runtime executor gang (boot
     // captures + spawner install; threads spawn lazily at first

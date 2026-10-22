@@ -124,3 +124,13 @@ be recycled by policy rather than by surprise:
   connected databases, stop it. No live database is dropped by recycling.
 - A restart costs ~80 ms of runtime startup plus the template being sealed
   on the new runtime's data directory (or shared via the same ZFS dataset).
+
+### Mint capacity
+
+The shipped ephemeral profile sets `pgrust.ephemeral_db_max_per_role = 100`.
+Use an explicit nonzero cap for each PGRun runtime; tune it to the runtime's
+storage budget and grace period. The engine's compatibility default remains
+`0` (unlimited), so control planes that generate their own configuration must
+set the cap themselves. A role at its cap receives SQLSTATE `53400`; existing
+connections remain usable, and reaping or dropping a database frees capacity.
+Template ownership policy remains the control plane's responsibility.

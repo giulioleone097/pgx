@@ -788,10 +788,10 @@ pub mod global_footprint {
 ///
 /// Three independent ceilings on memory-context bytes, all off at 0:
 ///
-/// - **session**: what one backend thread's contexts hold;
+/// - **session**: what a client backend and its parallel workers hold;
 /// - **database**: the sum over every thread attached to one database;
 /// - **runtime**: the process-wide [`global_footprint`], applied only to
-///   threads already holding more than [`RUNTIME_FLOOR`], so that a small
+///   sessions already holding more than [`RUNTIME_FLOOR`], so that a small
 ///   session keeps working while a large one is refused.
 ///
 /// Enforcement is a refused block allocation: the allocator returns
@@ -805,7 +805,7 @@ pub mod global_footprint {
 /// stacks and allocator retention are not charged to anyone.
 ///
 /// Only threads that called [`limits::enforce`] are ever refused (client
-/// backends); auxiliary threads are charged but never refused. Refusals are
+/// backends and their parallel workers); auxiliary threads are charged but never refused. Refusals are
 /// also suppressed inside critical sections ([`limits::crit_enter`]) —
 /// an allocation failure there is a PANIC — and requests below
 /// [`SMALL_REQUEST`] are admitted until the ceiling is exceeded by 25%, so
@@ -875,6 +875,7 @@ pub mod limits {
             pub enforce: Cell<bool>,
             pub last_refusal: Cell<Option<Refused>>,
             pub group: RefCell<Option<Arc<AtomicUsize>>>,
+            pub session: RefCell<Option<super::SessionHandle>>,
         }
 
         impl Drop for ThreadAcct {
@@ -884,6 +885,9 @@ pub mod limits {
             fn drop(&mut self) {
                 if let Some(g) = self.group.borrow().as_ref() {
                     sub_sat(g, self.bytes.get());
+                }
+                if let Some(g) = self.session.borrow().as_ref() {
+                    sub_sat(&g.0, self.bytes.get());
                 }
             }
         }
@@ -895,6 +899,7 @@ pub mod limits {
                     enforce: Cell::new(false),
                     last_refusal: Cell::new(None),
                     group: RefCell::new(None),
+                    session: RefCell::new(None),
                 }
             };
         }
@@ -918,6 +923,9 @@ pub mod limits {
             if let Some(g) = a.group.borrow().as_ref() {
                 g.fetch_add(n, Relaxed);
             }
+            if let Some(g) = a.session.borrow().as_ref() {
+                g.0.fetch_add(n, Relaxed);
+            }
         });
         #[cfg(not(any(feature = "std", test)))]
         let _ = n;
@@ -934,6 +942,9 @@ pub mod limits {
             a.bytes.set(had - take);
             if let Some(g) = a.group.borrow().as_ref() {
                 imp::sub_sat(g, take);
+            }
+            if let Some(g) = a.session.borrow().as_ref() {
+                imp::sub_sat(&g.0, take);
             }
         });
         #[cfg(not(any(feature = "std", test)))]
@@ -960,7 +971,9 @@ pub mod limits {
                         return None;
                     }
                     let mine = a.bytes.get();
-                    let refused = if over(mine, n, SESSION_LIMIT.load(Relaxed)) {
+                    let session_bytes = a.session.borrow().as_ref()
+                        .map_or(mine, |g| g.0.load(Relaxed));
+                    let refused = if over(session_bytes, n, SESSION_LIMIT.load(Relaxed)) {
                         Some(Refused::Session)
                     } else if a
                         .group
@@ -969,7 +982,7 @@ pub mod limits {
                         .is_some_and(|g| over(g.load(Relaxed), n, DATABASE_LIMIT.load(Relaxed)))
                     {
                         Some(Refused::Database)
-                    } else if mine.saturating_add(n) > RUNTIME_FLOOR
+                    } else if session_bytes.saturating_add(n) > RUNTIME_FLOOR
                         && over(crate::global_footprint::bytes(), n, RUNTIME_LIMIT.load(Relaxed))
                     {
                         Some(Refused::Runtime)
@@ -992,12 +1005,73 @@ pub mod limits {
         Ok(())
     }
 
-    /// Opt the calling thread into enforcement (client backends).
+    /// Opt the calling thread into enforcement (clients and parallel workers).
     pub fn enforce(on: bool) {
         #[cfg(any(feature = "std", test))]
         let _ = imp::ACCT.try_with(|a| a.enforce.set(on));
         #[cfg(not(any(feature = "std", test)))]
         let _ = on;
+    }
+
+    /// Shared accounting for a client session and its parallel query workers.
+    #[derive(Clone)]
+    pub struct SessionHandle(alloc::sync::Arc<AtomicUsize>);
+
+    /// Capture the current session before dispatching parallel work.
+    pub fn capture_session() -> SessionHandle {
+        #[cfg(any(feature = "std", test))]
+        {
+            return imp::ACCT.with(|a| {
+                a.session.borrow_mut().get_or_insert_with(||
+                    SessionHandle(alloc::sync::Arc::new(AtomicUsize::new(a.bytes.get())))
+                ).clone()
+            });
+        }
+        #[cfg(not(any(feature = "std", test)))]
+        SessionHandle(alloc::sync::Arc::new(AtomicUsize::new(0)))
+    }
+
+    /// Restores a worker's previous accounting when its task finishes or unwinds.
+    pub struct SessionBinding {
+        previous: Option<SessionHandle>,
+        previous_enforce: bool,
+    }
+
+    fn replace_session(next: Option<SessionHandle>) -> Option<SessionHandle> {
+        #[cfg(any(feature = "std", test))]
+        {
+            return imp::ACCT.with(|a| {
+                let previous = a.session.replace(next);
+                if let Some(g) = previous.as_ref() {
+                    imp::sub_sat(&g.0, a.bytes.get());
+                }
+                if let Some(g) = a.session.borrow().as_ref() {
+                    g.0.fetch_add(a.bytes.get(), Relaxed);
+                }
+                previous
+            });
+        }
+        #[cfg(not(any(feature = "std", test)))]
+        { let _ = next; None }
+    }
+
+    /// Bind a parallel worker to the leader's aggregate session ceiling.
+    pub fn bind_session(session: &SessionHandle) -> SessionBinding {
+        #[cfg(any(feature = "std", test))]
+        let previous_enforce = imp::ACCT.with(|a| a.enforce.replace(true));
+        #[cfg(not(any(feature = "std", test)))]
+        let previous_enforce = false;
+        SessionBinding {
+            previous: replace_session(Some(session.clone())),
+            previous_enforce,
+        }
+    }
+
+    impl Drop for SessionBinding {
+        fn drop(&mut self) {
+            replace_session(self.previous.take());
+            enforce(self.previous_enforce);
+        }
     }
 
     /// Attach the calling thread to database `db`'s group, moving the bytes
@@ -2267,6 +2341,38 @@ fn alloc_failed(context_name: &str, request: usize) -> ! {
     }
 }
 
+#[cfg(any(feature = "std", test))]
+std::thread_local! {
+    static FALLIBLE_ALLOCATIONS: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Execute an explicitly fallible allocation (for example `try_reserve`) without
+/// converting an allocation refusal to a statement error. Keep the closure to
+/// fallible allocator operations: infallible collection growth aborts on Err.
+/// The previous policy is restored on normal return and on unwind.
+#[cfg(any(feature = "std", test))]
+pub fn with_fallible_allocations<R>(f: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FALLIBLE_ALLOCATIONS.with(|p| p.set(self.0));
+        }
+    }
+    let _restore = Restore(FALLIBLE_ALLOCATIONS.with(|p| p.replace(true)));
+    f()
+}
+
+#[inline]
+fn allocation_failure(context: &str, request: usize) -> Result<NonNull<[u8]>, AllocError> {
+    #[cfg(any(feature = "std", test))]
+    if FALLIBLE_ALLOCATIONS.with(Cell::get) {
+        // A handled refusal must not contaminate a later, unrelated OOM hint.
+        limits::take_last_refusal();
+        return Err(AllocError);
+    }
+    alloc_failed(context, request)
+}
+
 // SAFETY contract for callers: one-statement &mut, never re-entered; one context, one thread.
 #[inline(always)]
 unsafe fn aset_mut(set: &core::cell::UnsafeCell<aset::AllocSet>) -> &mut aset::AllocSet {
@@ -2298,7 +2404,7 @@ unsafe impl Allocator for Mcx<'_> {
         }
         match self.allocate_unchecked(layout) {
             Ok(p) => Ok(p),
-            Err(AllocError) => alloc_failed(self.0.acct.name.get(), layout.size()),
+            Err(AllocError) => allocation_failure(self.0.acct.name.get(), layout.size()),
         }
     }
 
@@ -2391,7 +2497,7 @@ unsafe impl Allocator for Mcx<'_> {
         })();
         match grown {
             Ok(p) => Ok(p),
-            Err(AllocError) => alloc_failed(self.0.acct.name.get(), new_layout.size()),
+            Err(AllocError) => allocation_failure(self.0.acct.name.get(), new_layout.size()),
         }
     }
 
@@ -2873,7 +2979,10 @@ pub fn vec_reserve_huge<'mcx, T>(v: &mut PgVec<'mcx, T>, additional: usize) -> P
     }
     debug_assert!(core::mem::size_of::<T>() != 0, "huge reserve of a ZST cannot fail");
     let new_layout = core::alloc::Layout::array::<T>(need).map_err(|_| mcx.oom(request))?;
-    let p = mcx.alloc_uninit_bytes_huge(new_layout).map_err(|_| mcx.oom(request))?;
+    // This API is explicitly fallible: callers such as tuplesort/tuplestore
+    // roll back their bookkeeping on Err. Keep the old vector untouched on
+    // refusal, without the allocator's infallible-lane unwind policy.
+    let p = mcx.allocate_unchecked(new_layout).map_err(|_| mcx.oom(request))?.cast::<u8>();
     let old_cap = v.capacity();
     let old_vec = core::mem::replace(v, PgVec::new_in(mcx));
     let (old_ptr, old_len, _old_cap, _mcx) = split_vec_raw_parts(old_vec);
