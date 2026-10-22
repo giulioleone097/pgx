@@ -309,7 +309,7 @@ Options
 
 Environment
   PGX_HOME                data home (default ~/.pgx)
-  PGX_PORT                port for the first `pgx run`/`pgx serve` (else auto 5432-5500)
+  PGX_PORT                port for init / first run or serve (else auto 5432-5500)
   PGX_DURABILITY          ephemeral (default) or full, for the first init
   PGX_PASSWORD            superuser password for the first init (else random)
 

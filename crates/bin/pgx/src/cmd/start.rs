@@ -250,10 +250,8 @@ pub fn serve(out: &Out) -> Result<ExitCode> {
     use crate::layout::Home;
     let home = Home::resolve();
     if !home.is_initialized() {
-        let port = std::env::var("PGX_PORT").ok().and_then(|p| p.parse().ok());
-        let durability = std::env::var("PGX_DURABILITY").ok();
         out.note("pgx serve: initialising a new cluster");
-        crate::cmd::init::run(out, port, durability, false)?;
+        crate::cmd::init::run(out, None, None, false)?;
     }
     let ctx = Ctx::load()?;
     if let Some(pid) = ctx.running_pid() {
