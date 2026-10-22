@@ -73,7 +73,7 @@ class ParallelLimits(unittest.TestCase):
                     try:
                         outcome["result"] = failed.query(query).rows
                     except pgclient.DbError as error:
-                        outcome.update(sqlstate=error.sqlstate, hint=error.hint)
+                        outcome.update(sqlstate=error.sqlstate, hint=error.hint, context=error.fields.get("W", ""))
                     except Exception as error:
                         outcome["unexpected_error"] = repr(error)
 
@@ -101,6 +101,7 @@ class ParallelLimits(unittest.TestCase):
                 self.assertGreater(sibling_queries, 0)
                 self.assertEqual(outcome.get("sqlstate"), "53200", outcome)
                 self.assertIn("pgrust.session_memory_limit", outcome.get("hint") or "")
+                self.assertIn("parallel worker", outcome.get("context", ""), outcome)
                 # Reuse both original connections: reconnecting would hide a
                 # crashed backend or a runtime-wide crash cascade.
                 self.assertEqual(failed.query("SELECT 1").scalar(), "1")
@@ -112,6 +113,7 @@ class ParallelLimits(unittest.TestCase):
                     "session_limit_mb": 16,
                     "refused_allocation_mb": 48,
                     "sqlstate": outcome["sqlstate"],
+                    "error_context": outcome["context"],
                     "bystander_queries_during": sibling_queries,
                     "same_session_after": "1",
                     "sibling_session_after": "1",
