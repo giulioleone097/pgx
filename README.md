@@ -8,7 +8,7 @@
 <p align="center">
   <img alt="Postgres 18.6" src="https://img.shields.io/badge/Postgres-18.6-336791">
   <img alt="Version: v0.1" src="https://img.shields.io/badge/version-v0.1-blue">
-  <img alt="Regression suite: 223 of 231 byte-exact" src="https://img.shields.io/badge/regression_suite-223%2F231_byte--exact-green">
+  <img alt="Nightly regression gate" src="https://github.com/pgrundev/pgx/actions/workflows/nightly.yml/badge.svg?event=schedule">
   <a href="LICENSE"><img alt="License: AGPL-3.0" src="https://img.shields.io/badge/license-AGPL--3.0-blue"></a>
 </p>
 
@@ -175,10 +175,10 @@ hundreds of times less physical storage than a full copy.
 
 | | Result |
 |---|---|
-| PostgreSQL regression suite | 223 / 231 byte-exact (nightly, 2026-10-21). 6 differ only in EXPLAIN plan text; **2 have result differences** (`select_parallel`: parallel-worker context lines and one boolean; `stats`: one boolean), tracked in [#17](https://github.com/pgrundev/pgx/issues/17). |
+| PostgreSQL regression suite | 223 / 231 byte-exact (nightly, 2026-10-21). 6 differ only in EXPLAIN plan text; **2 have result differences** (`select_parallel`: parallel-worker context lines and one boolean; `stats`: one boolean), tracked in [#17](https://github.com/pgrundev/pgx/issues/17). Current counts and diffs are in the [latest nightly artifacts](https://github.com/pgrundev/pgx/actions/workflows/nightly.yml); semantic changes fail the gate. |
 | Real Rails 8.1 app (migrations, fixtures, model tests, schema change, `db:schema:load`) | passes; within 0–5 % of PostgreSQL 18 per phase |
 | Django 5.2, Prisma 6, SQLAlchemy 2, node-postgres, Rails-shaped SQL | pass |
-| All framework runs | **36 / 36** |
+| Framework runs | **18 / 18 PGX** (plus 18 PostgreSQL control runs) |
 
 Transactional behaviour follows PostgreSQL, including transactional DDL
 and temporary tables:

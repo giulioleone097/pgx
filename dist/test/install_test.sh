@@ -5,6 +5,8 @@
 #
 #   PG18_BINDIR=/opt/homebrew/opt/postgresql@18/bin dist/test/install_test.sh
 set -eu
+export PGX_INSECURE_ALLOW_HTTP=1
+export PGX_INSECURE_SKIP_VERIFY=1
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/pgx-install-test.XXXXXX")"
 SRV_PID=""

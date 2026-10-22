@@ -8,12 +8,25 @@ on:
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
+permissions:
+  contents: read
 jobs:
   worker:
     name: pgx.dev /install Worker tests
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/fuzz/corpus/
+            !/benchmarks/pgx/results/
+      - name: Installer security and regression gate tests
+        run: |
+          python3 dist/test/test_installer_security.py
+          python3 benchmarks/pgx/tests/test_regression_gate.py
       - name: Worker unit tests (node:test)
         run: node --test dist/pgx.dev/install-worker.test.js
   cli:
@@ -26,7 +39,14 @@ jobs:
         os: [ubuntu-24.04, ubuntu-24.04-arm, macos-14]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/fuzz/corpus/
+            !/benchmarks/pgx/results/
       - name: Confirm architecture
         run: |
           echo "runner.os=${{ runner.os }} runner.arch=${{ runner.arch }}"
@@ -37,7 +57,7 @@ jobs:
         run: |
           sudo install -d /usr/share/postgresql-common/pgdg
           sudo wget -qO /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
-          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends postgresql-18 postgresql-client-18 libre2-dev pkg-config build-essential
           echo "PG18_BINDIR=/usr/lib/postgresql/18/bin" >> "$GITHUB_ENV"
@@ -48,15 +68,17 @@ jobs:
           brew install postgresql@18 re2 pkg-config
           echo "PG18_BINDIR=$(brew --prefix postgresql@18)/bin" >> "$GITHUB_ENV"
           echo "$(brew --prefix postgresql@18)/bin" >> "$GITHUB_PATH"
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: "1.96.0"
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: Format and clippy (pgx crate)
         run: |
           cargo fmt -p pgx -- --check
           cargo clippy -p pgx --all-targets -- -D warnings
+      - name: PGX engine unit tests
+        run: cargo test --release --locked --lib -p mcx -p l2cache -p relcache -p janitor -p memwatchdog -p guc_tables -p autovacuum -p pgstat -p adt_xml
       - name: Build engine and CLI
         run: cargo build --release --locked --bin postgres --bin pgx
       - name: Assemble distribution
@@ -74,7 +96,8 @@ jobs:
       - name: Black-box suites
         run: |
           python3 -I tests/pgx/test_sql.py
-          cargo test -p pgx --release --test lifecycle --test databases --test clone --test doctor --test run --test ttl
+          python3 -I tests/pgx/test_features.py
+          cargo test -p pgx --release --test lifecycle --test databases --test clone --test doctor --test run --test ttl --test hardening
       - name: Installer end-to-end
         run: dist/test/install_test.sh
       - name: Installer discovery/version/checksum/download tests
@@ -88,7 +111,14 @@ jobs:
         os: [ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/fuzz/corpus/
+            !/benchmarks/pgx/results/
       - name: Confirm architecture
         run: |
           echo "runner.arch=${{ runner.arch }} uname -m: $(uname -m)"
@@ -97,3 +127,21 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client-16 || true
           dist/test/docker_test.sh
+  dependencies:
+    name: Dependency security, licenses and sources
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/fuzz/corpus/
+            !/benchmarks/pgx/results/
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with: { toolchain: "1.96.0" }
+      - name: Install audited dependency checker
+        run: cargo install cargo-deny --locked --version 0.20.2
+      - name: Dependency policy
+        run: cargo deny --locked check advisories licenses bans sources

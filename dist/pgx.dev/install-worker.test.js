@@ -21,18 +21,18 @@ const notFound = () => new Response("", { status: 404 });
 
 test("valid pinned ref serves the script with the right type and ref header", async () => {
   const calls = stubFetch(okResp);
-  const res = await worker.fetch(new Request("https://pgx.dev/install"), { INSTALL_REF: "v0.1.0-beta.1" });
+  const res = await worker.fetch(new Request("https://pgx.dev/install"), { INSTALL_REF: "d0df77764a3f697db7b12c67a1658e08a59bdb96" });
   assert.equal(res.status, 200);
   assert.match(res.headers.get("content-type"), /text\/x-shellscript/);
-  assert.equal(res.headers.get("x-pgx-install-ref"), "v0.1.0-beta.1");
+  assert.equal(res.headers.get("x-pgx-install-ref"), "d0df77764a3f697db7b12c67a1658e08a59bdb96");
   assert.equal(await res.text(), SCRIPT);
   assert.equal(calls.length, 1);
-  assert.ok(calls[0].includes("/pgrundev/pgx/v0.1.0-beta.1/dist/install.sh"), calls[0]);
+  assert.ok(calls[0].includes("/pgrundev/pgx/d0df77764a3f697db7b12c67a1658e08a59bdb96/dist/install.sh"), calls[0]);
 });
 
 test("upstream failure returns 502, not an empty 200", async () => {
   stubFetch(notFound);
-  const res = await worker.fetch(new Request("https://pgx.dev/install"), { INSTALL_REF: "v0.1.0-beta.1" });
+  const res = await worker.fetch(new Request("https://pgx.dev/install"), { INSTALL_REF: "d0df77764a3f697db7b12c67a1658e08a59bdb96" });
   assert.equal(res.status, 502);
   assert.notEqual(await res.text(), "");
 });
@@ -53,20 +53,29 @@ test("mutable branch ref (main) is rejected", async () => {
 
 test("accepts a commit sha ref", async () => {
   const calls = stubFetch(okResp);
-  const res = await worker.fetch(new Request("https://pgx.dev/install"), { INSTALL_REF: "4175767612" });
+  const res = await worker.fetch(new Request("https://pgx.dev/install"), { INSTALL_REF: "4175767612417576761241757676124175767612" });
   assert.equal(res.status, 200);
-  assert.ok(calls[0].includes("/4175767612/dist/install.sh"));
+  assert.ok(calls[0].includes("/4175767612417576761241757676124175767612/dist/install.sh"));
 });
 
 test("route isolation: only /install is served", async () => {
   const calls = stubFetch(okResp);
-  const res = await worker.fetch(new Request("https://pgx.dev/"), { INSTALL_REF: "v0.1.0-beta.1" });
+  const res = await worker.fetch(new Request("https://pgx.dev/"), { INSTALL_REF: "d0df77764a3f697db7b12c67a1658e08a59bdb96" });
   assert.equal(res.status, 404);
   assert.equal(calls.length, 0);
 });
 
 test("non-GET methods are rejected", async () => {
   stubFetch(okResp);
-  const res = await worker.fetch(new Request("https://pgx.dev/install", { method: "POST" }), { INSTALL_REF: "v0.1.0-beta.1" });
+  const res = await worker.fetch(new Request("https://pgx.dev/install", { method: "POST" }), { INSTALL_REF: "d0df77764a3f697db7b12c67a1658e08a59bdb96" });
   assert.equal(res.status, 405);
+});
+
+test("tags and short commit IDs are rejected", async () => {
+  const calls = stubFetch(okResp);
+  for (const ref of ["v0.1.0", "4175767"]) {
+    const res = await worker.fetch(new Request("https://pgx.dev/install"), { INSTALL_REF: ref });
+    assert.equal(res.status, 500);
+  }
+  assert.equal(calls.length, 0);
 });

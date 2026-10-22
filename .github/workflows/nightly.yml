@@ -5,47 +5,89 @@ on:
 # The heavy suites that are too slow for every PR: stress, repeated crash
 # recovery, the behavioural compatibility suite against a PostgreSQL 18
 # control, and the PostgreSQL regression baseline.
+permissions:
+  contents: read
 jobs:
   stress-and-compat:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/fuzz/corpus/
+            !/benchmarks/pgx/results/
       - name: Install PostgreSQL 18 and RE2
         run: |
           sudo install -d /usr/share/postgresql-common/pgdg
           sudo wget -qO /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
-          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
-          sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-18 postgresql-client-18 libre2-dev pkg-config build-essential ruby ruby-dev
-          sudo gem install pg minitest --no-document
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-18 postgresql-client-18 libre2-dev pkg-config build-essential postgresql-server-dev-18 python3-pip python3-venv nodejs npm golang-go
+          python3 -m pip install --break-system-packages psycopg[binary]
           echo "PG18_BINDIR=/usr/lib/postgresql/18/bin" >> "$GITHUB_ENV"
           echo "/usr/lib/postgresql/18/bin" >> "$GITHUB_PATH"
-      - uses: dtolnay/rust-toolchain@master
+      - uses: ruby/setup-ruby@e1bd6146574da5e0795075b5319b300edb30c5b0 # v1
+        with: { ruby-version: '3.4' }
+      - name: Install Rails fixture gems
+        run: gem install pg minitest activerecord --no-document
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with: { toolchain: "1.96.0" }
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - run: cargo build --release --locked --bin postgres --bin pgx
       - name: Assemble
         run: |
           dist/assemble.sh --out "$RUNNER_TEMP/rel" --version "nightly-${{ github.sha }}" --pg-bindir "$PG18_BINDIR"
           echo "PGX_DIST=$(find "$RUNNER_TEMP/rel" -maxdepth 1 -type d -name 'pgx-nightly-*')" >> "$GITHUB_ENV"
-      - name: Crash recovery (ephemeral + full)
-        run: |
-          PGX_TEST_DURABILITY=ephemeral python3 -I tests/pgx/test_crash.py
-          PGX_TEST_DURABILITY=full python3 -I tests/pgx/test_crash.py
-      - name: Isolation and concurrency
-        run: |
-          python3 -I tests/pgx/test_isolation.py
-          python3 -I tests/pgx/test_concurrency.py
-      - name: Storage (portable) and clone consistency
-        run: |
-          python3 -I tests/pgx/test_storage.py
-          python3 -I tests/pgx/clone_consistency.py
+      - name: PGX feature contracts
+        if: ${{ !cancelled() && env.PGX_DIST != '' }}
+        run: python3 -I tests/pgx/test_features.py
+      - name: Crash recovery (ephemeral)
+        if: ${{ !cancelled() && env.PGX_DIST != '' }}
+        run: PGX_TEST_DURABILITY=ephemeral python3 -I tests/pgx/test_crash.py
+      - name: Crash recovery (full)
+        if: ${{ !cancelled() && env.PGX_DIST != '' }}
+        run: PGX_TEST_DURABILITY=full python3 -I tests/pgx/test_crash.py
+      - name: Isolation
+        if: ${{ !cancelled() && env.PGX_DIST != '' }}
+        run: python3 -I tests/pgx/test_isolation.py
+      - name: Concurrency
+        if: ${{ !cancelled() && env.PGX_DIST != '' }}
+        run: python3 -I tests/pgx/test_concurrency.py
+      - name: Storage (portable)
+        if: ${{ !cancelled() && env.PGX_DIST != '' }}
+        run: python3 -I tests/pgx/test_storage.py
+      - name: Clone consistency
+        if: ${{ !cancelled() && env.PGX_DIST != '' }}
+        run: python3 -I tests/pgx/clone_consistency.py
       - name: Stress acceptance
+        if: ${{ !cancelled() && env.PGX_DIST != '' }}
         run: python3 -I tests/pgx/stress.py --cycles 1000 --clients 100 --duration 60 --startstop 50
       - name: Compatibility vs PostgreSQL 18 control
+        if: ${{ !cancelled() && env.PGX_DIST != '' }}
         run: tests/compat/run.sh
       - name: Regression baseline
+        if: ${{ !cancelled() && env.PGX_DIST != '' }}
         run: |
-          python3 benchmarks/pgx/regress-baseline.py --out "$RUNNER_TEMP/regress" --binary target/release/postgres --conf configs/pgx-ephemeral.conf --max-connections 15 || true
+          python3 benchmarks/pgx/regress-baseline.py --out "$RUNNER_TEMP/regress" --binary target/release/postgres --conf configs/pgx-ephemeral.conf --max-connections 15
           python3 benchmarks/pgx/classify-regress-diffs.py "$RUNNER_TEMP/regress"
       - name: Application fixtures
+        if: ${{ !cancelled() && env.PGX_DIST != '' }}
         run: tests/apps/run_all.sh
+      - name: Workspace unit test baseline
+        if: ${{ !cancelled() && env.PGX_DIST != '' }}
+        run: cargo test --release --locked --workspace --lib
+      - name: Upload regression evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nightly-regression-${{ github.sha }}
+          path: ${{ runner.temp }}/regress/
+          if-no-files-found: warn
+      - name: Report all suite outcomes
+        if: always()
+        env:
+          STEPS_JSON: ${{ toJSON(steps) }}
+        run: |
+          printf 'Nightly suite outcomes\n\n```json\n%s\n```\n' "$STEPS_JSON" >> "$GITHUB_STEP_SUMMARY"

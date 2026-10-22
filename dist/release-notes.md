@@ -5,6 +5,8 @@ development, CI and disposable databases. No system PostgreSQL required.
 
 ## Install
 
+Requires GitHub CLI 2.49+ (`gh attestation verify`) for signed provenance.
+
 ```sh
 curl -fsSL https://pgx.dev/install | sh
 pgx run                             # a ready `app` database in one step
@@ -12,7 +14,17 @@ pgx clone app agent-001 --ttl 5m    # a disposable branch that auto-expires
 ```
 
 Or download the tarball for your platform below, verify its SHA-256 against
-`checksums.txt`, and extract it; `bin/pgx` is relocatable.
+the corresponding `.sha256`, and verify its signed provenance before extracting:
+
+```sh
+gh attestation verify pgx-<version>-<os>-<arch>.tar.gz \
+  --bundle pgx-<version>-<os>-<arch>.tar.gz.sigstore.json \
+  --repo pgrundev/pgx \
+  --signer-workflow pgrundev/pgx/.github/workflows/release.yml \
+  --deny-self-hosted-runners
+```
+
+`bin/pgx` is relocatable.
 
 ## Platforms
 

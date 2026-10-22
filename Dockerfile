@@ -9,12 +9,12 @@
 #   psql "postgres://postgres:secret@localhost:5432/postgres"
 
 # ---------- builder ----------
-FROM rust:1.96-bookworm AS builder
+FROM rust:1.96-bookworm@sha256:a339861ae23e9abb272cea45dfafde21760d2ce6577a70f8a926153677902663 AS builder
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential pkg-config libre2-dev clang ca-certificates gnupg lsb-release wget \
  && install -d /usr/share/postgresql-common/pgdg \
  && wget -qO /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc \
- && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
+ && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
  && apt-get update && apt-get install -y --no-install-recommends postgresql-18 postgresql-client-18 \
  && rm -rf /var/lib/apt/lists/*
 ENV PATH="/usr/lib/postgresql/18/bin:${PATH}" CC=/usr/bin/cc
@@ -29,7 +29,7 @@ RUN useradd -m builder && mkdir -p /out && chown builder:builder /out \
  && mv /out/pgx-*/ /pgx
 
 # ---------- runtime ----------
-FROM ubuntu:24.04
+FROM ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac
 # The PGX engine (like PostgreSQL) refuses to run as root, so the image runs as
 # an unprivileged `pgx` user. Create it, own the data/run dirs, and COPY the
 # distribution owned by pgx so the bundled base cluster (mode 700) is readable.

@@ -14,6 +14,7 @@ function) column header and its "(N rows)" footer. A test is
 Writes <dir>/classification.json and prints a table.
 """
 
+import argparse
 import json
 import os
 import re
@@ -40,10 +41,20 @@ def plan_lines(path):
 
 
 def main():
-    outdir = sys.argv[1]
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("outdir")
+    ap.add_argument("--allowlist", default=os.path.join(os.path.dirname(__file__), "regress-allowlist.json"))
+    args = ap.parse_args()
+    outdir = args.outdir
+    with open(args.allowlist) as f:
+        allowlist = json.load(f)
+    with open(os.path.join(outdir, "regress.json")) as f:
+        baseline = json.load(f)
+    if not isinstance(allowlist, dict) or any(not isinstance(v, str) or not v.strip() for v in allowlist.values()):
+        ap.error("allowlist entries must have a nonempty reason")
     tests, cur = {}, None
     diffs = os.path.join(outdir, "regression.diffs")
-    with open(diffs if os.path.exists(diffs) else os.devnull, errors="replace") as f:
+    with open(diffs, errors="replace") as f:
         for line in f:
             line = line.rstrip("\n")
             m = DIFF_RE.match(line)
@@ -77,12 +88,35 @@ def main():
             name, t["class"], t["plan_lines"], t["semantic_lines"]))
         for ex in t["semantic_examples"]:
             print("      " + ex)
+    semantic = sorted(n for n, t in tests.items() if t["class"] == "semantic")
+    failed = {t["test"] for t in baseline["tests"] if not t["byte_exact"]}
+    unexplained = sorted(failed - set(tests))
+    unapproved = sorted(failed - set(allowlist))
+    summary = baseline["summary"]
+    problems = []
+    if semantic:
+        problems.append("semantic differences: " + ", ".join(semantic))
+    if unexplained:
+        problems.append("failures without classified diffs: " + ", ".join(unexplained))
+    if unapproved:
+        problems.append("failures absent from plan-only allowlist: " + ", ".join(unapproved))
+    if summary["not_reported"] or summary["reported"] != summary["scheduled"]:
+        problems.append("regression suite did not report every scheduled test")
+    if summary["server_died_during_run"] or summary["pg_regress_exit_code"] not in (0, 1):
+        problems.append("regression harness or server failed")
+    if set(tests) - failed:
+        problems.append("diffs disagree with pg_regress results")
+    report = {"plan_only": sorted(n for n, t in tests.items() if t["class"] == "plan_only"),
+              "semantic": semantic, "tests": tests, "summary": summary,
+              "git_commit": baseline["git_commit"], "gate_passed": not problems,
+              "failures": problems}
     with open(os.path.join(outdir, "classification.json"), "w") as f:
-        json.dump({"plan_only": sorted(n for n, t in tests.items() if t["class"] == "plan_only"),
-                   "semantic": sorted(n for n, t in tests.items() if t["class"] == "semantic"),
-                   "tests": tests}, f, indent=2)
+        json.dump(report, f, indent=2)
         f.write("\n")
+    for problem in problems:
+        print("FAIL: " + problem, file=sys.stderr)
+    return bool(problems)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

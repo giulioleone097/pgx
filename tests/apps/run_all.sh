@@ -5,8 +5,8 @@
 #   PGX_DIST=<prefix> tests/apps/run_all.sh [app ...]   (default: all)
 #
 # Prints one line per app: PASS, FAIL or COVERAGE GAP. Exit 0 only if no app FAILED
-# (coverage gaps do not fail the run; they are reported).
-set -u
+# (coverage gaps fail when CI=true or CI=1).
+set -eu
 [ -n "${PGX_DIST:-}" ] || { echo "PGX_DIST is not set (dist/assemble.sh --out ...)" >&2; exit 2; }
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PGX="$PGX_DIST/bin/pgx"
@@ -21,13 +21,16 @@ trap cleanup EXIT INT TERM
 echo "runtime: $("$PGX" version | head -1)"
 fail=0
 for app in $APPS; do
-  [ -x "$HERE/$app/run.sh" ] || { echo "APP $app: COVERAGE GAP (no fixture)"; continue; }
+  [ -x "$HERE/$app/run.sh" ] || { echo "APP $app: COVERAGE GAP (no fixture)"; case "${CI:-}" in 1|true) fail=1;; esac; continue; }
   "$PGX" drop "${app}_fx" --force >/dev/null 2>&1 || true
   "$PGX" create "${app}_fx" >/dev/null
   URL="$("$PGX" url "${app}_fx")"
-  DATABASE_URL="$URL" PGX_TEST_PSQL="${PGX_TEST_PSQL:-}" sh "$HERE/$app/run.sh"
-  rc=$?
-  [ $rc -eq 1 ] && fail=1
+  if DATABASE_URL="$URL" PGX_TEST_PSQL="${PGX_TEST_PSQL:-}" sh "$HERE/$app/run.sh"; then rc=0; else rc=$?; fi
+  case "$rc" in
+    0) ;;
+    2) case "${CI:-}" in 1|true) fail=1;; esac ;;
+    *) fail=1 ;;
+  esac
   "$PGX" drop "${app}_fx" --force >/dev/null 2>&1 || true
 done
 exit $fail

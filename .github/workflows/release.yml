@@ -11,7 +11,7 @@ on:
 # PACKAGED artifact (not a dev binary), and uploads a DRAFT release with
 # checksums. Publishing the draft is a manual step (never automated).
 permissions:
-  contents: write
+  contents: read
 jobs:
   # Public release artifacts are built from main only: refuse a tag that does
   # not point at a commit on the main branch (e.g. a tag pushed from prod or a
@@ -19,20 +19,43 @@ jobs:
   # these public release artifacts.
   guard:
     runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/fuzz/corpus/
+            !/benchmarks/pgx/results/
       - name: Tag must be an ancestor of origin/main
         run: |
-          git fetch origin main --depth=0 || git fetch origin main
+          git fetch origin main
           if git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
             echo "ok: $GITHUB_SHA is on main"
           else
             echo "::error::refusing to release $GITHUB_SHA — it is not on main. Public releases are cut from main only." >&2
             exit 1
           fi
+      - name: Determine and validate version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            version="$INPUT_VERSION"
+          else
+            version="${GITHUB_REF_NAME#v}"
+          fi
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]] || { echo "::error::invalid release version"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
   build:
     needs: guard
+    env:
+      VERSION: ${{ needs.guard.outputs.version }}
     name: ${{ matrix.target }}
     strategy:
       fail-fast: false
@@ -43,15 +66,20 @@ jobs:
           - { os: macos-14,         target: darwin-arm64 }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - name: Determine version
-        run: echo "VERSION=${GITHUB_REF_NAME#v}${{ github.event.inputs.version && format('{0}', github.event.inputs.version) || '' }}" >> "$GITHUB_ENV"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/fuzz/corpus/
+            !/benchmarks/pgx/results/
       - name: Install PostgreSQL 18 and RE2 (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo install -d /usr/share/postgresql-common/pgdg
           sudo wget -qO /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
-          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
           sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-18 postgresql-client-18 libre2-dev pkg-config build-essential
           echo "PG18_BINDIR=/usr/lib/postgresql/18/bin" >> "$GITHUB_ENV"
       - name: Install PostgreSQL 18 and build tools (macOS)
@@ -62,20 +90,13 @@ jobs:
           # issue #10). We build a STATIC re2+abseil prefix instead.
           brew install postgresql@18 pkg-config cmake ninja
           echo "PG18_BINDIR=$(brew --prefix postgresql@18)/bin" >> "$GITHUB_ENV"
-      - name: Cache static re2+abseil prefix (macOS)
-        if: runner.os == 'macOS'
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/pgx-static-re2
-          key: static-re2-macos-arm64-absl20260817.0-re2-2025-11-05-v1
       - name: Build static re2+abseil prefix (macOS)
         if: runner.os == 'macOS'
         run: |
           PREFIX="$(PGX_RE2_PREFIX="$RUNNER_TEMP/pgx-static-re2" dist/macos/build-static-re2.sh)"
           echo "PKG_CONFIG_PATH=$PREFIX/lib/pkgconfig:$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with: { toolchain: "1.96.0" }
-      - uses: Swatinem/rust-cache@v2
       - name: Build
         run: cargo build --release --locked --bin postgres --bin pgx
       - name: Assemble
@@ -87,27 +108,52 @@ jobs:
         run: |
           export PGX_DIST="$(find "$RUNNER_TEMP/rel" -maxdepth 1 -type d -name "pgx-$VERSION-*")"
           cargo test -p pgx --release --test lifecycle --test databases --test clone
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: pgx-${{ matrix.target }}
           path: |
             ${{ runner.temp }}/rel/*.tar.gz
             ${{ runner.temp }}/rel/*.tar.gz.sha256
   draft:
-    needs: build
+    needs: [guard, build]
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/fuzz/corpus/
+            !/benchmarks/pgx/results/
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with: { path: artifacts }
+      - name: Sign build provenance for the packaged artifacts
+        id: provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: artifacts/**/*.tar.gz
+      - name: Publish verification bundles alongside each archive
+        env:
+          BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+        run: |
+          find artifacts -name '*.tar.gz' -exec cp "$BUNDLE" {}.sigstore.json \;
       - name: Collect checksums
         run: |
           cd artifacts && find . -name '*.sha256' -exec cat {} \; > ../checksums.txt
           cat ../checksums.txt
       - name: Create draft release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           draft: true
+          tag_name: v${{ needs.guard.outputs.version }}
+          target_commitish: ${{ github.sha }}
           files: |
             artifacts/**/*.tar.gz
             artifacts/**/*.tar.gz.sha256
+            artifacts/**/*.tar.gz.sigstore.json
           body_path: dist/release-notes.md

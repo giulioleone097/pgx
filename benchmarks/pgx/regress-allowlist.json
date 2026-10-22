@@ -1,0 +1,14 @@
+{
+  "create_index": "Known EXPLAIN shape difference in the PGX profile (baseline 727f31e49f); allowed only while every changed line remains inside an EXPLAIN block.",
+  "incremental_sort": "Known EXPLAIN shape difference in the PGX profile (baseline 727f31e49f); allowed only while every changed line remains inside an EXPLAIN block.",
+  "join": "Known EXPLAIN shape difference in the PGX profile (baseline 727f31e49f); allowed only while every changed line remains inside an EXPLAIN block.",
+  "limit": "Known EXPLAIN shape difference in the PGX profile (baseline 727f31e49f); allowed only while every changed line remains inside an EXPLAIN block.",
+  "memoize": "Known EXPLAIN shape difference in the PGX profile (baseline 727f31e49f); allowed only while every changed line remains inside an EXPLAIN block.",
+  "partition_aggregate": "Known EXPLAIN shape difference in the PGX profile (baseline 727f31e49f); allowed only while every changed line remains inside an EXPLAIN block.",
+  "partition_join": "Known EXPLAIN shape difference in the PGX profile (baseline 727f31e49f); allowed only while every changed line remains inside an EXPLAIN block.",
+  "partition_prune": "Known EXPLAIN shape difference in the PGX profile (baseline 727f31e49f); allowed only while every changed line remains inside an EXPLAIN block.",
+  "portals": "Known EXPLAIN shape difference in the PGX profile (baseline 727f31e49f); allowed only while every changed line remains inside an EXPLAIN block.",
+  "select_distinct": "Known EXPLAIN shape difference in the PGX profile (baseline 727f31e49f); allowed only while every changed line remains inside an EXPLAIN block.",
+  "subselect": "Known EXPLAIN shape difference in the PGX profile (baseline 727f31e49f); allowed only while every changed line remains inside an EXPLAIN block.",
+  "tidscan": "Known EXPLAIN shape difference in the PGX profile (baseline 727f31e49f); allowed only while every changed line remains inside an EXPLAIN block."
+}

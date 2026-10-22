@@ -1,6 +1,6 @@
 #!/bin/sh
 # PGX installer. Downloads the release tarball for this OS and CPU, verifies
-# its SHA-256, and installs it under $PGX_INSTALL_DIR, linking `pgx` into
+# its SHA-256 and signed build provenance, and installs it under $PGX_INSTALL_DIR, linking `pgx` into
 # $PGX_BIN_DIR. No root, no system PostgreSQL.
 #
 #   curl -fsSL https://pgx.dev/install | sh
@@ -10,8 +10,12 @@
 #   PGX_VERSION       version to install (default: latest release)
 #   PGX_INSTALL_DIR   where the distribution tree goes (default: ~/.pgx/dist/<version>)
 #   PGX_BIN_DIR       where the `pgx` symlink goes     (default: ~/.local/bin)
-#   PGX_BASE_URL      release download base            (default: the GitHub releases URL)
+#   PGX_BASE_URL      release download base (HTTPS only)
+#   PGX_INSECURE_SKIP_VERIFY=1  explicitly skip signed provenance (legacy releases)
+#   PGX_INSECURE_ALLOW_HTTP=1   local test servers only
+#   PGX_FORCE=1         permit replacing an unrelated pgx executable/symlink
 set -eu
+umask 077
 
 REPO="pgrundev/pgx"
 BASE_URL="${PGX_BASE_URL:-https://github.com/$REPO/releases/download}"
@@ -39,9 +43,21 @@ if [ "$os" = darwin ] && [ "$arch" = amd64 ]; then
   err "macOS on Intel is not a supported target; supported: darwin-arm64, linux-amd64, linux-arm64"
 fi
 
-# Downloader.
-if have curl; then dl() { curl -fsSL "$1" -o "$2"; }; dlout() { curl -fsSL "$1"; }
-elif have wget; then dl() { wget -qO "$2" "$1"; }; dlout() { wget -qO- "$1"; }
+# Downloader. Reject transport downgrades unless explicitly testing locally.
+case "$BASE_URL $API_URL" in *http://*)
+  [ "${PGX_INSECURE_ALLOW_HTTP:-}" = 1 ] || err "HTTPS is required (HTTP is only allowed with PGX_INSECURE_ALLOW_HTTP=1 for local tests)" ;;
+esac
+case "$BASE_URL" in https://*|http://*) ;; *) err "invalid release base URL" ;; esac
+case "$API_URL" in https://*|http://*) ;; *) err "invalid API URL" ;; esac
+proto="=https"
+[ "${PGX_INSECURE_ALLOW_HTTP:-}" != 1 ] || proto="=http,https"
+if have curl; then dl() { curl --proto "$proto" --proto-redir "$proto" --tlsv1.2 -fsSL "$1" -o "$2"; }; dlout() { curl --proto "$proto" --proto-redir "$proto" --tlsv1.2 -fsSL "$1"; }
+elif have wget; then
+  if [ "${PGX_INSECURE_ALLOW_HTTP:-}" = 1 ]; then
+    dl() { wget --secure-protocol=TLSv1_2 -qO "$2" "$1"; }; dlout() { wget --secure-protocol=TLSv1_2 -qO- "$1"; }
+  else
+    dl() { wget --https-only --secure-protocol=TLSv1_2 -qO "$2" "$1"; }; dlout() { wget --https-only --secure-protocol=TLSv1_2 -qO- "$1"; }
+  fi
 else err "need curl or wget"; fi
 
 version="${PGX_VERSION:-}"
@@ -54,11 +70,21 @@ if [ -z "$version" ]; then
   [ -n "$version" ] || err "could not find a published release to install; set PGX_VERSION (none published yet?)"
 fi
 version="${version#v}"
+case "$version" in ""|*[!0-9A-Za-z.+-]*) err "invalid release version" ;; esac
 install_dir="${PGX_INSTALL_DIR:-$HOME/.pgx/dist/$version}"
 
 name="pgx-$version-$os-$arch"
 url="$BASE_URL/v$version/$name.tar.gz"
 sum_url="$url.sha256"
+
+if [ -e "$BIN_DIR/pgx" ] || [ -L "$BIN_DIR/pgx" ]; then
+  managed=false
+  if [ -L "$BIN_DIR/pgx" ]; then
+    previous="$(readlink "$BIN_DIR/pgx")"
+    [ ! -f "$(dirname "$previous")/../share/pgx/dist.json" ] || managed=true
+  fi
+  [ "$managed" = true ] || [ "${PGX_FORCE:-}" = 1 ] || err "refusing to replace $BIN_DIR/pgx; set PGX_FORCE=1 to replace it explicitly"
+fi
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/pgx-install.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT INT TERM
@@ -74,8 +100,28 @@ else err "need sha256sum or shasum to verify the download"; fi
 [ -n "$expected" ] || err "empty checksum file"
 [ "$expected" = "$actual" ] || err "checksum mismatch (expected $expected, got $actual); refusing to install"
 
+if [ "${PGX_INSECURE_SKIP_VERIFY:-}" = 1 ]; then
+  echo "pgx installer: WARNING: signed build provenance verification explicitly disabled" >&2
+else
+  have gh || err "need GitHub CLI with 'gh attestation verify' (>=2.49) to verify signed provenance"
+  dl "$url.sigstore.json" "$tmp/bundle.json" || err "signed provenance download failed (legacy releases require PGX_INSECURE_SKIP_VERIFY=1)"
+  gh attestation verify "$tmp/$name.tar.gz" --bundle "$tmp/bundle.json" \
+    --repo "$REPO" --signer-workflow "$REPO/.github/workflows/release.yml" \
+    --deny-self-hosted-runners >/dev/null || err "signed build provenance verification failed; refusing to install"
+fi
+
+# Distribution members must be regular files/directories inside the named root.
+# Reject links, special files, absolute paths and traversal before extracting.
+tar -tzf "$tmp/$name.tar.gz" > "$tmp/members" || err "cannot list archive"
+while IFS= read -r member; do
+  member="${member%/}"
+  case "$member" in "$name"|"$name/"|"$name/"*) ;; *) err "unsafe archive member: $member" ;; esac
+  case "/$member/" in *"/../"*|*"/./"*|*"//"*) err "unsafe archive member: $member" ;; esac
+done < "$tmp/members"
+tar -tvzf "$tmp/$name.tar.gz" > "$tmp/member-types" || err "cannot inspect archive types"
+awk 'substr($0,1,1) != "-" && substr($0,1,1) != "d" { bad=1 } END { exit bad }' "$tmp/member-types" || err "archive contains links or special files"
 echo "pgx installer: extracting ..."
-tar -xzf "$tmp/$name.tar.gz" -C "$tmp" || err "extract failed"
+tar --no-same-owner -xzf "$tmp/$name.tar.gz" -C "$tmp" || err "extract failed"
 [ -x "$tmp/$name/bin/pgx" ] || err "archive does not contain bin/pgx"
 
 # Install atomically: into <dir>.partial then rename.
