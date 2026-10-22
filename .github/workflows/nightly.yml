@@ -41,41 +41,60 @@ jobs:
           dist/assemble.sh --out "$RUNNER_TEMP/rel" --version "nightly-${{ github.sha }}" --pg-bindir "$PG18_BINDIR"
           echo "PGX_DIST=$(find "$RUNNER_TEMP/rel" -maxdepth 1 -type d -name 'pgx-nightly-*')" >> "$GITHUB_ENV"
       - name: PGX feature contracts
+        id: features
         if: ${{ !cancelled() && env.PGX_DIST != '' }}
-        run: python3 -I tests/pgx/test_features.py
+        run: |
+          python3 -I tests/pgx/test_features.py
+          python3 -I tests/pgx/test_parallel_limits.py
       - name: Crash recovery (ephemeral)
+        id: crash_ephemeral
         if: ${{ !cancelled() && env.PGX_DIST != '' }}
         run: PGX_TEST_DURABILITY=ephemeral python3 -I tests/pgx/test_crash.py
       - name: Crash recovery (full)
+        id: crash_full
         if: ${{ !cancelled() && env.PGX_DIST != '' }}
         run: PGX_TEST_DURABILITY=full python3 -I tests/pgx/test_crash.py
       - name: Isolation
+        id: isolation
         if: ${{ !cancelled() && env.PGX_DIST != '' }}
         run: python3 -I tests/pgx/test_isolation.py
       - name: Concurrency
+        id: concurrency
         if: ${{ !cancelled() && env.PGX_DIST != '' }}
         run: python3 -I tests/pgx/test_concurrency.py
       - name: Storage (portable)
+        id: storage
         if: ${{ !cancelled() && env.PGX_DIST != '' }}
         run: python3 -I tests/pgx/test_storage.py
       - name: Clone consistency
+        id: clone
         if: ${{ !cancelled() && env.PGX_DIST != '' }}
         run: python3 -I tests/pgx/clone_consistency.py
       - name: Stress acceptance
+        id: stress
         if: ${{ !cancelled() && env.PGX_DIST != '' }}
         run: python3 -I tests/pgx/stress.py --cycles 1000 --clients 100 --duration 60 --startstop 50
       - name: Compatibility vs PostgreSQL 18 control
+        id: compat
         if: ${{ !cancelled() && env.PGX_DIST != '' }}
         run: tests/compat/run.sh
+      # PostgreSQL regression SQL assumes stock resource/durability settings.
+      # PGX profile behavior is checked by the independent feature suites.
       - name: Regression baseline
+        id: regression
         if: ${{ !cancelled() && env.PGX_DIST != '' }}
         run: |
-          python3 benchmarks/pgx/regress-baseline.py --out "$RUNNER_TEMP/regress" --binary target/release/postgres --conf configs/pgx-ephemeral.conf --max-connections 15
+          python3 benchmarks/pgx/regress-baseline.py --out "$RUNNER_TEMP/regress" --binary target/release/postgres --max-connections 15 \
+            --server-arg=-c --server-arg=max_parallel_workers_per_gather=2 \
+            --server-arg=-c --server-arg=max_parallel_workers=8 \
+            --server-arg=-c --server-arg=max_worker_processes=8
           python3 benchmarks/pgx/classify-regress-diffs.py "$RUNNER_TEMP/regress"
       - name: Application fixtures
+        id: apps
         if: ${{ !cancelled() && env.PGX_DIST != '' }}
         run: tests/apps/run_all.sh
       - name: Workspace unit test baseline
+        id: workspace
         if: ${{ !cancelled() && env.PGX_DIST != '' }}
         run: cargo test --release --locked --workspace --lib
       - name: Upload regression evidence
@@ -85,9 +104,18 @@ jobs:
           name: nightly-regression-${{ github.sha }}
           path: ${{ runner.temp }}/regress/
           if-no-files-found: warn
+      - name: Upload engine and fixture diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nightly-diagnostics-${{ github.sha }}
+          path: |
+            /tmp/pgxt/*/h/log/
+            tests/apps/**/*.log
+          if-no-files-found: ignore
       - name: Report all suite outcomes
         if: always()
         env:
           STEPS_JSON: ${{ toJSON(steps) }}
         run: |
-          printf 'Nightly suite outcomes\n\n```json\n%s\n```\n' "$STEPS_JSON" >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' 'Nightly suite outcomes' '' '~~~json' "$STEPS_JSON" '~~~' >> "$GITHUB_STEP_SUMMARY"

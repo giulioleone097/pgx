@@ -44,14 +44,7 @@ jobs:
         id: version
         env:
           INPUT_VERSION: ${{ inputs.version }}
-        run: |
-          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
-            version="$INPUT_VERSION"
-          else
-            version="${GITHUB_REF_NAME#v}"
-          fi
-          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]] || { echo "::error::invalid release version"; exit 1; }
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+        run: dist/release-version.sh >> "$GITHUB_OUTPUT"
   build:
     needs: guard
     env:
@@ -106,7 +99,8 @@ jobs:
         run: dist/test/macos_selfcontained_test.sh "$(find "$RUNNER_TEMP/rel" -maxdepth 1 -type d -name "pgx-$VERSION-*")"
       - name: Verify the packaged artifact (lifecycle suite)
         run: |
-          export PGX_DIST="$(find "$RUNNER_TEMP/rel" -maxdepth 1 -type d -name "pgx-$VERSION-*")"
+          PGX_DIST="$(find "$RUNNER_TEMP/rel" -maxdepth 1 -type d -name "pgx-$VERSION-*")"
+          export PGX_DIST
           cargo test -p pgx --release --test lifecycle --test databases --test clone
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

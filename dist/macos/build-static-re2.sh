@@ -37,14 +37,14 @@ if [ -f "$PREFIX/lib/libre2.a" ] && [ -f "$PREFIX/lib/pkgconfig/re2.pc" ] && ls 
   echo "$PREFIX"; exit 0
 fi
 command -v cmake >/dev/null 2>&1 || { log "cmake is required"; exit 1; }
-command -v ninja >/dev/null 2>&1 && GEN="-G Ninja" || GEN=""
+if command -v ninja >/dev/null 2>&1; then set -- -G Ninja; else set --; fi
 : "${CC:=/usr/bin/cc}"; : "${CXX:=/usr/bin/c++}"
 export CC CXX
 rm -rf "$PREFIX" "$WORK"; mkdir -p "$PREFIX" "$WORK"
 
 log "cloning + building abseil $ABSL_COMMIT (static)"
 fetch_source https://github.com/abseil/abseil-cpp "$ABSL_COMMIT" "$WORK/absl"
-cmake -S "$WORK/absl" -B "$WORK/absl-b" $GEN \
+cmake -S "$WORK/absl" -B "$WORK/absl-b" "$@" \
   -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
   -DABSL_ENABLE_INSTALL=ON -DABSL_PROPAGATE_CXX_STD=ON \
   -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_CXX_STANDARD=17 \
@@ -53,7 +53,7 @@ cmake --build "$WORK/absl-b" --target install >&2 2>&1
 
 log "cloning + building re2 $RE2_COMMIT (static, against the static abseil)"
 fetch_source https://github.com/google/re2 "$RE2_COMMIT" "$WORK/re2"
-cmake -S "$WORK/re2" -B "$WORK/re2-b" $GEN \
+cmake -S "$WORK/re2" -B "$WORK/re2-b" "$@" \
   -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DRE2_BUILD_TESTING=OFF \
   -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_CXX_STANDARD=17 \
   -DCMAKE_PREFIX_PATH="$PREFIX" -DCMAKE_INSTALL_PREFIX="$PREFIX" >&2
@@ -61,5 +61,5 @@ cmake --build "$WORK/re2-b" --target install >&2 2>&1
 
 [ -f "$PREFIX/lib/libre2.a" ] || { log "ERROR: libre2.a not produced"; exit 1; }
 ls "$PREFIX"/lib/libabsl_*.a >/dev/null 2>&1 || { log "ERROR: no static abseil archives"; exit 1; }
-log "ok: $(ls "$PREFIX"/lib/libabsl_*.a | wc -l | tr -d ' ') abseil archives + libre2.a in $PREFIX"
+log "ok: $(find "$PREFIX/lib" -name 'libabsl_*.a' -type f | wc -l | tr -d ' ') abseil archives + libre2.a in $PREFIX"
 echo "$PREFIX"

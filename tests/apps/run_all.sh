@@ -14,8 +14,9 @@ APPS="${*:-psql node python go rails}"
 SCRATCH="${PGX_TEST_SCRATCH:-/tmp/pgxt}"; mkdir -p "$SCRATCH"
 export PGX_HOME="$SCRATCH/apps-$$"
 export PGX_RUN_DIR="/tmp/pgxa$$"
+# shellcheck disable=SC2329 # Called by the EXIT/INT/TERM trap below.
 cleanup() { "$PGX" stop --force >/dev/null 2>&1 || true; [ -n "${PGX_TEST_KEEP:-}" ] || rm -rf "$PGX_HOME" "$PGX_RUN_DIR"; }
-trap cleanup EXIT INT TERM
+trap 'cleanup' EXIT INT TERM
 "$PGX" init >/dev/null
 "$PGX" start >/dev/null
 echo "runtime: $("$PGX" version | head -1)"

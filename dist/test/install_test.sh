@@ -21,7 +21,7 @@ VERSION="0.0.0-install-test"
   --pgx "$ROOT/target/debug/pgx" ${PG18_BINDIR:+--pg-bindir "$PG18_BINDIR"} >/dev/null || fail "assemble"
 
 # Lay the files out as GitHub releases serve them: <base>/v<version>/<name>.tar.gz
-OS="$(uname -s | tr 'A-Z' 'a-z')"; [ "$OS" = darwin ] || OS=linux
+OS="$(uname -s | tr '[:upper:]' '[:lower:]')"; [ "$OS" = darwin ] || OS=linux
 ARCH="$(uname -m)"; case "$ARCH" in x86_64|amd64) ARCH=amd64;; aarch64|arm64) ARCH=arm64;; esac
 NAME="pgx-$VERSION-$OS-$ARCH"
 [ -f "$TMP/rel/v$VERSION/$NAME.tar.gz" ] || fail "assemble did not produce $NAME.tar.gz"
@@ -43,6 +43,9 @@ sh "$ROOT/dist/install.sh" >"$TMP/install.log" 2>&1 || { cat "$TMP/install.log";
 # Relocate the whole install tree; the binary must still work (relocatable).
 mv "$TMP/opt/pgx/$VERSION" "$TMP/opt/pgx/moved"
 "$TMP/opt/pgx/moved/bin/pgx" version >/dev/null || fail "relocated installation does not run"
+
+# Use a fresh link destination after intentionally relocating the install.
+export PGX_BIN_DIR="$TMP/bin-bad"
 
 # Tamper with the tarball so the checksum no longer matches: install must refuse.
 printf 'x' >> "$TMP/rel/v$VERSION/$NAME.tar.gz"

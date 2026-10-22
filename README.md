@@ -81,7 +81,7 @@ different.
 ~674 ms      copy-on-write branch ready
 ~13.6 MB     initial additional physical storage
 
-223 / 231    PostgreSQL regression tests byte-exact
+219 / 231    PostgreSQL regression tests byte-exact (stock PostgreSQL settings)
 2            tests with result differences (6 more differ in EXPLAIN text only)
 ```
 
@@ -175,7 +175,7 @@ hundreds of times less physical storage than a full copy.
 
 | | Result |
 |---|---|
-| PostgreSQL regression suite | 223 / 231 byte-exact (nightly, 2026-10-21). 6 differ only in EXPLAIN plan text; **2 have result differences** (`select_parallel`: parallel-worker context lines and one boolean; `stats`: one boolean), tracked in [#17](https://github.com/pgrundev/pgx/issues/17). Current counts and diffs are in the [latest nightly artifacts](https://github.com/pgrundev/pgx/actions/workflows/nightly.yml); semantic changes fail the gate. |
+| PostgreSQL regression suite | 219 / 231 byte-exact; 12 differ only in EXPLAIN output, **0 result differences** with stock PostgreSQL settings ([2026-10-22 validation](docs/pgx/audit-regression-validation.md)). [Latest nightly artifacts](https://github.com/pgrundev/pgx/actions/workflows/nightly.yml) include current counts and diffs; semantic changes fail the gate. |
 | Real Rails 8.1 app (migrations, fixtures, model tests, schema change, `db:schema:load`) | passes; within 0–5 % of PostgreSQL 18 per phase |
 | Django 5.2, Prisma 6, SQLAlchemy 2, node-postgres, Rails-shaped SQL | pass |
 | Framework runs | **18 / 18 PGX** (plus 18 PostgreSQL control runs) |

@@ -1,0 +1,61 @@
+{
+  "stock": {
+    "summary": {
+      "scheduled": 231,
+      "reported": 231,
+      "byte_exact_pass": 219,
+      "order_only_diff": 0,
+      "real_diff": 12,
+      "not_reported": [],
+      "pg_regress_exit_code": 1,
+      "server_died_during_run": false,
+      "elapsed_s": 65.1
+    },
+    "plan_only": [
+      "create_index",
+      "incremental_sort",
+      "join",
+      "limit",
+      "memoize",
+      "partition_aggregate",
+      "partition_join",
+      "partition_prune",
+      "portals",
+      "select_distinct",
+      "subselect",
+      "tidscan"
+    ],
+    "semantic": [],
+    "gate_passed": true,
+    "engine_commit": "d62547da71",
+    "binary_source": "Published pgx 0.1.0 linux-amd64 artifact; same engine for both runs"
+  },
+  "ephemeral": {
+    "summary": {
+      "scheduled": 231,
+      "reported": 231,
+      "byte_exact_pass": 223,
+      "order_only_diff": 0,
+      "real_diff": 8,
+      "not_reported": [],
+      "pg_regress_exit_code": 1,
+      "server_died_during_run": false,
+      "elapsed_s": 44.9
+    },
+    "plan_only": [
+      "incremental_sort",
+      "partition_aggregate",
+      "partition_prune",
+      "plpgsql",
+      "portals",
+      "select_distinct"
+    ],
+    "semantic": [
+      "select_parallel",
+      "stats"
+    ],
+    "gate_passed": false,
+    "engine_commit": "d62547da71",
+    "binary_source": "Published pgx 0.1.0 linux-amd64 artifact; same engine for both runs"
+  }
+}
