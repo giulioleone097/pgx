@@ -95,7 +95,7 @@ Every response carries `host_id`, `runtime_id`, `request_id`, and either
 | `PinDatabase(name)` / `UnpinDatabase(name)` | `pgrust_pin_database()` / `pgrust_unpin_database()` | `{"pinned": true}`; pins live in memory, so the agent re-applies them after a runtime restart |
 | `DropDatabase(name, request_id)` | `DROP DATABASE … WITH (FORCE)`; drop its role | `{"dropped": true}` (dropping a missing database also returns success) |
 | `EnsureTemplate(golden_id, version)` | restore from object storage onto the host's ZFS cache; `pgrust_seal_template()` | `{"template", "version", "restored": true, "ms"}` |
-| `SetWarmPool(size)` | `pgrust.ephemeral_db_pool_size` (spares of `pgrust.ephemeral_db_default_template`); `pg_reload_conf()` | `{"pool_size": n}` |
+| `SetWarmPool(size)` | `pgrust.ephemeral_db_pool_size` (spares per template registered by its first mint; reseal to invalidate its spares); `pg_reload_conf()` | `{"pool_size": n}` |
 | `DrainRuntime()` / `RecycleRuntime()` | stop placements; start a replacement; stop the old runtime once nothing is connected or pinned | progress events on the channel |
 
 Error codes map PGX SQLSTATEs onto stable agent codes:

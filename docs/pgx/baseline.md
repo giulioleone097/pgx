@@ -40,8 +40,8 @@ compared byte-for-byte against the vendored expected output.
 
 All 12 differences are **plan-only**: every changed line (1,156 of them) is
 inside `EXPLAIN` output; no statement result, row count or error message
-differs (`regress/classification.json`, produced by
-`classify-regress-diffs.py`). The server did not crash.
+differs (`benchmarks/pgx/results/pgrust-17813ef9d8/regress/classification.json`,
+produced by `benchmarks/pgx/classify-regress-diffs.py`). The server did not crash.
 
 Cause: PgRust ships more aggressive parallel-query defaults than PostgreSQL,
 so the planner picks `Gather` / `Parallel Seq Scan` plans where the expected

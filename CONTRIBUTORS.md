@@ -1,13 +1,7 @@
-# Contributing to pgrust
+# PGX contributors
 
-We are not actively accepting pull requests right now. If you want to help
-out with the project, reach out on [Discord](https://discord.gg/FZZ4dbdvwU).
+PGX is maintained at [pgrundev/pgx](https://github.com/pgrundev/pgx). Contributions
+are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
 
-Please do still open an issue if something breaks, if setup is confusing, or
-if there is a Postgres behavior you want matched.
-
-## Contact
-
-- Discord: <https://discord.gg/FZZ4dbdvwU>
-- Email: maintainers@pgrust.com
-- Updates: <https://pgrust.com/#updates>
+PGX builds on PgRust and PostgreSQL. Their copyright and license notices remain
+in [NOTICE](NOTICE) and the source tree. Git history records contributions to this fork.

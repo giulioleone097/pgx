@@ -1,5 +1,9 @@
 # PGX local development distribution — implementation plan
 
+> Historical implementation plan. This records the original design and completed
+> work, not current contributor or agent instructions. Follow
+> [CONTRIBUTING.md](../../../CONTRIBUTING.md) and the current source and CI workflows.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A self-contained, relocatable PGX distribution with a `pgx` CLI (`init`, `start`, `stop`, `restart`, `status`, `create`, `drop`, `clone`, `ls`, `url`, `doctor`, `version`) that installs without a system PostgreSQL and is proven by automated lifecycle, compatibility, crash, isolation, storage and stress tests.

@@ -1,5 +1,9 @@
 # PGX — LLM Implementation Instructions
 
+> Historical implementation plan. This records the original design and completed
+> work, not current contributor or agent instructions. Follow
+> [CONTRIBUTING.md](CONTRIBUTING.md) and the current source and CI workflows.
+
 ## Mission
 
 This repository is a fork of PgRust:
