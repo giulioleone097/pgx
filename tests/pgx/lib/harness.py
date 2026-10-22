@@ -68,13 +68,14 @@ class CliResult:
 
 
 class Pgx:
-    def __init__(self, name="t", durability=None, keep=False):
+    def __init__(self, name="t", durability=None, keep=False, settings=None):
         self.prefix = dist_prefix()
         self.home = os.path.join(scratch_root(), "%s-%d-%s" % (name, os.getpid(), free_port()))
         os.makedirs(self.home)
         self.port = free_port()
         self.durability = durability
         self.keep = keep or bool(os.environ.get("PGX_TEST_KEEP"))
+        self.settings = settings or {}
         self.env = dict(os.environ, PGX_HOME=self.home)
         self.env.pop("PGHOST", None)
         self.env.pop("PGPORT", None)
@@ -115,7 +116,14 @@ class Pgx:
         args = ["init", "--port", str(self.port)] + list(extra)
         if self.durability:
             args += ["--durability", self.durability]
-        return self.cli(*args, check=True)
+        result = self.cli(*args, check=True)
+        if self.settings:
+            # Test-only settings follow include 'pgx.conf', so startup-only
+            # features can be enabled before the first engine launch.
+            with open(os.path.join(self.data, "postgresql.conf"), "a") as f:
+                for key, value in self.settings.items():
+                    f.write("\n%s = %s\n" % (key, value))
+        return result
 
     def start(self):
         return self.cli("start", check=True)
