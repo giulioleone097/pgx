@@ -86,6 +86,10 @@ pub enum Command {
     Doctor,
     /// Hidden: the background TTL cleanup worker, spawned by start/run/serve.
     Supervise,
+    /// Hidden: restart a failed TTL worker while this runtime is alive.
+    Watch {
+        home: String,
+    },
     Version,
     Help,
 }
@@ -242,6 +246,13 @@ pub fn parse(args: &[String]) -> Result<(Global, Command)> {
             only_flags(&[])?;
             arity(0, "supervise")?;
             Command::Supervise
+        }
+        "watch" => {
+            only_flags(&[])?;
+            arity(1, "watch <home>")?;
+            Command::Watch {
+                home: positional[0].into(),
+            }
         }
         "url" => {
             only_flags(&["socket"])?;

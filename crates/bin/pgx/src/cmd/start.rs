@@ -69,6 +69,7 @@ pub fn ensure_running(out: &Out, ctx: &Ctx) -> Result<StartOutcome> {
 fn start_locked(out: &Out, ctx: &Ctx) -> Result<StartOutcome> {
     let sock_dir = ctx.sock_dir();
     if let Some(pid) = ctx.running_pid() {
+        spawn_supervisor(&ctx.home);
         return Ok(StartOutcome {
             started: false,
             already_running: true,
@@ -131,7 +132,7 @@ fn start_locked(out: &Out, ctx: &Ctx) -> Result<StartOutcome> {
             return Err(e);
         }
     }
-    // Bring up the background TTL cleanup worker (single-instance; a redundant
+    // Bring up the background TTL watchdog (single-instance; a redundant
     // spawn exits immediately). It runs detached and outlives this CLI process.
     spawn_supervisor(&ctx.home);
     // The child lives on in its own session; the CLI exits without reaping it.
@@ -172,24 +173,29 @@ fn emit_start(out: &Out, ctx: &Ctx, o: &StartOutcome, restarted: bool) {
     );
 }
 
-/// `pgx serve`: run the engine in the FOREGROUND, replacing this process, so it
-/// can be PID 1 in a container or a systemd simple service. Initialises first
-/// if $PGX_HOME is empty, reading PGX_PORT / PGX_DURABILITY / PGX_LISTEN like
-/// Spawn the background TTL supervisor, detached in its own session so it
+/// Spawn the background TTL watchdog, detached in its own session so it
 /// outlives this CLI invocation and survives a terminal hangup. Single-instance
 /// by its own lock, so a redundant spawn simply exits; callers need not check.
 pub fn spawn_supervisor(home: &crate::layout::Home) {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
-    let Ok(exe) = std::env::current_exe() else {
-        return;
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(error) => {
+            eprintln!("pgx: cannot locate executable for TTL watchdog: {error}");
+            return;
+        }
     };
     let mut cmd = Command::new(exe);
-    cmd.arg("supervise")
-        .env("PGX_HOME", &home.root)
+    let root = std::fs::canonicalize(&home.root).unwrap_or_else(|_| home.root.clone());
+    cmd.arg("watch")
+        .arg(&root)
+        .env("PGX_HOME", &root)
         .stdin(Stdio::null());
     if let Some(parent) = home.log_file.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            eprintln!("pgx: cannot create TTL watchdog log directory: {error}");
+        }
     }
     match std::fs::OpenOptions::new()
         .create(true)
@@ -200,22 +206,47 @@ pub fn spawn_supervisor(home: &crate::layout::Home) {
             Ok(f2) => {
                 cmd.stdout(Stdio::from(f)).stderr(Stdio::from(f2));
             }
-            Err(_) => {
+            Err(error) => {
+                eprintln!("pgx: cannot duplicate TTL watchdog log: {error}");
                 cmd.stdout(Stdio::null()).stderr(Stdio::null());
             }
         },
-        Err(_) => {
+        Err(error) => {
+            eprintln!("pgx: cannot open TTL watchdog log: {error}");
             cmd.stdout(Stdio::null()).stderr(Stdio::null());
         }
     }
     // SAFETY: setsid() in the child only; no allocation or shared-state access.
     unsafe {
         cmd.pre_exec(|| {
-            libc::setsid();
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
             Ok(())
         });
     }
-    let _ = cmd.spawn();
+    match cmd.spawn() {
+        Ok(mut child) => {
+            // Ensure a following stop can see and stop the watchdog even under
+            // scheduler pressure, rather than letting it appear after stop.
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while !super::watch::running(home) {
+                if let Ok(Some(status)) = child.try_wait() {
+                    eprintln!("pgx: TTL watchdog exited before taking its lock: {status}");
+                    return;
+                }
+                if std::time::Instant::now() >= deadline {
+                    eprintln!(
+                        "pgx: TTL watchdog has not started; check {}",
+                        home.log_file.display()
+                    );
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        Err(error) => eprintln!("pgx: cannot start TTL watchdog: {error}"),
+    }
 }
 
 /// Stop the background TTL supervisor for this home, if one is running. The
@@ -226,6 +257,7 @@ pub fn spawn_supervisor(home: &crate::layout::Home) {
 /// racing a lingering one for the lock. Sends SIGTERM, waits briefly for exit,
 /// and removes the pid file.
 pub fn stop_supervisor(home: &crate::layout::Home) {
+    super::watch::stop(home);
     let pid_path = home.root.join("supervisor.pid");
     let Ok(text) = std::fs::read_to_string(&pid_path) else {
         return;
@@ -245,7 +277,8 @@ pub fn stop_supervisor(home: &crate::layout::Home) {
     let _ = std::fs::remove_file(&pid_path);
 }
 
-/// the Docker entrypoint expects.
+/// `pgx serve`: keep a foreground monitor as PID 1, owning the engine and TTL
+/// worker. Forward signals and reap the worker here, never in the postmaster.
 pub fn serve(out: &Out) -> Result<ExitCode> {
     use crate::layout::Home;
     let home = Home::resolve();
@@ -277,25 +310,24 @@ pub fn serve(out: &Out) -> Result<ExitCode> {
     )
     .map_err(|e| PgxError::io("cannot write", &pgx_conf, &e))?;
     std::fs::create_dir_all(&sock_dir).map_err(|e| PgxError::io("cannot create", &sock_dir, &e))?;
-    // Start the TTL worker before we exec the engine (this process is replaced).
-    // It polls until the engine accepts connections, then cleans up normally.
-    spawn_supervisor(&ctx.home);
+
     out.note(&format!(
-        "pgx serve: exec engine on port {} (socket {})",
+        "pgx serve: starting engine on port {} (socket {})",
         ctx.config.port,
         sock_dir.display()
     ));
-    exec_engine_foreground(&ctx.install, &ctx.home, &ctx.config, &sock_dir)
+    super::watch::serve(out, &ctx, || {
+        spawn_engine_foreground(&ctx.install, &ctx.home, &ctx.config, &sock_dir)
+    })
 }
 
-/// Replaces this process with the engine (execvp). Returns only on failure.
-fn exec_engine_foreground(
+/// Start the engine with inherited stdio; the foreground pgx parent owns it.
+fn spawn_engine_foreground(
     install: &crate::layout::Install,
     home: &crate::layout::Home,
     cfg: &crate::config::Config,
     sock_dir: &std::path::Path,
-) -> Result<ExitCode> {
-    use std::os::unix::process::CommandExt;
+) -> Result<std::process::Child> {
     // Raise the stack soft limit for the engine, like process::spawn does.
     let mut rl = libc::rlimit {
         rlim_cur: 0,
@@ -308,12 +340,14 @@ fn exec_engine_foreground(
             unsafe { libc::setrlimit(libc::RLIMIT_STACK, &rl) };
         }
     }
-    let err = std::process::Command::new(&install.engine)
+    std::process::Command::new(&install.engine)
         .args(crate::process::engine_args(home, cfg, sock_dir))
         .envs(crate::process::engine_env(install))
-        .exec();
-    Err(PgxError::failure(format!(
-        "cannot exec the engine {}: {err}",
-        install.engine.display()
-    )))
+        .spawn()
+        .map_err(|error| {
+            PgxError::failure(format!(
+                "cannot start the engine {}: {error}",
+                install.engine.display()
+            ))
+        })
 }

@@ -98,15 +98,35 @@ pub fn command_line(pid: u32) -> Option<String> {
 /// mentions the data directory (a backup, an editor) as our engine.
 pub fn engine_cmdline_matches(cmd: &str, data_dir: &Path) -> bool {
     let needle = format!("-D {}", data_dir.display());
-    cmd.split(&needle)
+    if cmd
+        .split(&needle)
         .skip(1)
         .any(|rest| rest.is_empty() || rest.starts_with([' ', '\0']))
+    {
+        return true;
+    }
+    let args: Vec<_> = cmd.split_whitespace().collect();
+    args.windows(2)
+        .any(|pair| pair[0] == "-D" && same_path(Path::new(pair[1]), data_dir))
+}
+
+fn same_path(a: &Path, b: &Path) -> bool {
+    a == b
+        || matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(a), Ok(b)) if a == b)
 }
 
 /// True when `pid` is alive and is an engine started on this data directory.
 pub fn is_our_engine(pid: u32, data_dir: &Path) -> bool {
     if !pid_alive(pid) {
         return false;
+    }
+    #[cfg(target_os = "linux")]
+    if let Ok(raw) = std::fs::read(format!("/proc/{pid}/cmdline")) {
+        use std::os::unix::ffi::OsStrExt;
+        let args: Vec<_> = raw.split(|b| *b == 0).collect();
+        return args.windows(2).any(|pair| {
+            pair[0] == b"-D" && same_path(Path::new(std::ffi::OsStr::from_bytes(pair[1])), data_dir)
+        });
     }
     match command_line(pid) {
         Some(cmd) => engine_cmdline_matches(&cmd, data_dir),
@@ -385,6 +405,19 @@ mod tests {
             "/opt/pgx/bin/postgres -D /home/u/.pgx-other/data",
             data
         ));
+    }
+
+    #[test]
+    fn engine_identity_accepts_a_symlink_to_the_same_data_directory() {
+        let root = std::env::temp_dir().join(format!("pgx-identity-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("actual/data")).unwrap();
+        std::os::unix::fs::symlink(root.join("actual"), root.join("alias")).unwrap();
+        assert!(engine_cmdline_matches(
+            &format!("postgres -D {} -p 5432", root.join("alias/data").display()),
+            &root.join("actual/data"),
+        ));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(target_os = "linux")]

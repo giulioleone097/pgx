@@ -8,6 +8,7 @@ pub mod stop;
 pub mod supervise;
 pub mod ttl;
 pub mod version;
+pub mod watch;
 
 use crate::cli::ExitCode;
 use crate::config::Config;

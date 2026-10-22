@@ -1,7 +1,7 @@
 # Architecture of the local distribution
 
 ```
-pgx (CLI)  ──spawns / execs──>  postgres (engine, pgrust / PostgreSQL 18 compatible)
+pgx (CLI)  ──spawns / monitors──>  postgres (engine, pgrust / PostgreSQL 18 compatible)
    │                                   │
    │ Unix socket (trust) + built-in    │ reads share/ (timezone, tsearch, extension)
    │ wire-protocol client              │ data in $PGX_HOME/data

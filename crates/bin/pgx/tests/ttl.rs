@@ -8,13 +8,12 @@ use common::Pgx;
 use std::time::{Duration, Instant};
 
 fn db_exists(p: &Pgx, name: &str) -> bool {
-    p.psql(
+    let result = p.psql(
         "postgres",
         &format!("SELECT count(*) FROM pg_database WHERE datname='{name}'"),
-    )
-    .stdout
-    .trim()
-        == "1"
+    );
+    assert_eq!(result.code, 0, "database lookup failed: {}", result.all());
+    result.stdout.trim() == "1"
 }
 
 /// Poll until `name` is gone, up to `secs`. Returns true if it disappeared.
@@ -280,4 +279,148 @@ fn stop_stops_the_supervisor_and_restart_respawns_it() {
         "cleanup must resume after restart:\n{}",
         p.log_tail()
     );
+}
+
+fn wait_replacement(p: &Pgx, old: u32) -> u32 {
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        if let Some(pid) = p.supervisor_pid() {
+            if pid != old && p.supervisor_running() {
+                return pid;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "worker did not recover:\n{}",
+            p.log_tail()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn killed_supervisor_recovers_without_another_cli_invocation() {
+    let p = Pgx::new();
+    up(&p);
+    assert!(p.wait_supervisor(10));
+    let engines = p.engine_pids();
+    assert_eq!(p.run(&["create", "permanent"]).code, 0);
+    assert_eq!(p.run(&["create", "recover", "--ttl", "8s"]).code, 0);
+    let mut pid = p.supervisor_pid().unwrap();
+    // No CLI calls between SIGKILL and recovery: the background watchdog must
+    // heal on its own. Repeat to reject a one-shot recovery implementation.
+    for _ in 0..3 {
+        assert_eq!(unsafe { libc::kill(pid as i32, libc::SIGKILL) }, 0);
+        pid = wait_replacement(&p, pid);
+    }
+    assert!(
+        wait_gone(&p, "recover", 20),
+        "expired database survived recovery:\n{}",
+        p.log_tail()
+    );
+    assert_eq!(
+        p.engine_pids(),
+        engines,
+        "worker recovery restarted the engine"
+    );
+    for name in ["permanent", "app", "postgres", "template0", "template1"] {
+        assert!(db_exists(&p, name), "recovery deleted {name}");
+    }
+    // Concurrent callers must leave the same singleton worker in charge.
+    let callers: Vec<_> = (0..4).map(|_| p.cmd(&["start"]).spawn().unwrap()).collect();
+    for mut child in callers {
+        assert!(child.wait().unwrap().success());
+    }
+    assert_eq!(p.supervisor_pid(), Some(pid));
+    let watchdog = std::fs::read_to_string(p.home.join("watchdog.pid")).unwrap();
+    let watchdog: i32 = watchdog.trim().parse().unwrap();
+    p.stop_ok();
+    assert!(!p.home.join("watchdog.pid").exists());
+    // kill(0) sees unreaped zombies in bare containers; the removed pidfile and
+    // unlocked lock are the lifecycle authority after graceful shutdown.
+    let lock = std::fs::File::open(p.home.join("watchdog.lock")).unwrap();
+    use std::os::fd::AsRawFd;
+    assert_eq!(
+        unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0,
+        "watchdog {watchdog} retained its lock after stop"
+    );
+    assert!(!p.supervisor_running());
+}
+
+#[test]
+fn serve_worker_crash_preserves_an_existing_session_and_heals() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Command, Stdio};
+    let p = Pgx::new();
+    p.init_ok();
+    let mut serve = p
+        .cmd(&["serve"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    assert!(p.wait_supervisor(15), "serve did not launch its worker");
+    assert_eq!(p.run(&["create", "serve_expiry", "--ttl", "8s"]).code, 0);
+    let engines = p.engine_pids();
+    let mut session = Command::new(common::find_psql())
+        .args([
+            "-X",
+            "-qAt",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-h",
+            &p.sock_dir().to_string_lossy(),
+            "-p",
+            &p.port.to_string(),
+            "-U",
+            "postgres",
+            "-d",
+            "postgres",
+        ])
+        .env("PGOPTIONS", "-c statement_timeout=10000")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = session.stdin.take().unwrap();
+    let mut output = BufReader::new(session.stdout.take().unwrap());
+    writeln!(input, "BEGIN; SELECT 'connected';").unwrap();
+    input.flush().unwrap();
+    let mut line = String::new();
+    output.read_line(&mut line).unwrap();
+    assert_eq!(line.trim(), "connected");
+    let old = p.supervisor_pid().unwrap();
+    assert_eq!(unsafe { libc::kill(old as i32, libc::SIGKILL) }, 0);
+    wait_replacement(&p, old);
+    writeln!(input, "SELECT 42; COMMIT;").unwrap();
+    drop(input);
+    line.clear();
+    output.read_line(&mut line).unwrap();
+    assert_eq!(
+        line.trim(),
+        "42",
+        "the existing transaction was disconnected"
+    );
+    assert!(session.wait().unwrap().success());
+    assert_eq!(p.engine_pids(), engines);
+    assert!(wait_gone(&p, "serve_expiry", 20));
+    // The foreground monitor must still forward container shutdown signals.
+    assert_eq!(unsafe { libc::kill(serve.id() as i32, libc::SIGTERM) }, 0);
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if let Some(status) = serve.try_wait().unwrap() {
+            assert!(status.success(), "serve shutdown failed: {status}");
+            break;
+        }
+        if Instant::now() >= deadline {
+            let _ = serve.kill();
+            let _ = serve.wait();
+            panic!("serve did not forward SIGTERM");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(p.engine_pids().is_empty());
+    assert!(!p.supervisor_running());
 }

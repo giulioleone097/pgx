@@ -452,7 +452,7 @@ fn serve_runs_in_foreground_and_initialises() {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     assert!(ready, "pgx serve did not become ready\n{}", p.log_tail());
-    // The engine is a child of the serve process (foreground), i.e. serve exec'd it.
+    // The foreground monitor owns the engine as a separate child.
     assert!(
         p.home.join("data/PG_VERSION").is_file(),
         "serve did not initialise"
